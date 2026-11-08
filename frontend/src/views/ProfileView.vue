@@ -166,23 +166,6 @@
         </div>
       </router-link>
 
-      <router-link
-        v-if="false"
-        to="/analysis"
-        class="card p-4 hover:border-[var(--color-primary)] transition-all group flex flex-col justify-between"
-      >
-        <div class="flex items-center justify-between text-[var(--text-muted)] group-hover:text-[var(--text-primary)]">
-          <span class="text-xs font-medium">练习巩固</span>
-          <el-icon class="w-4 h-4"><TrendCharts /></el-icon>
-        </div>
-        <div class="mt-3">
-          <div class="text-2xl font-bold text-[var(--text-primary)] tabular-nums">{{ quizStore.knowledgeStats.total_quizzes }} 题</div>
-          <div class="text-[11px] text-[var(--color-success)] mt-0.5 font-medium">
-            正确率 {{ quizStore.knowledgeStats.accuracy_rate }}%
-          </div>
-        </div>
-      </router-link>
-
       <div
         class="card p-4 hover:border-[var(--color-primary)] transition-all group flex flex-col justify-between cursor-pointer"
         title="点击查看 Token 与多模态资源消耗看板"
@@ -199,11 +182,6 @@
           <div class="text-[11px] text-[var(--text-muted)] mt-0.5">全模态总览</div>
         </div>
       </div>
-    </div>
-
-    <!-- ── 每日学习活动热力图（GitHub 贡献图风格） ── -->
-    <div class="mb-8">
-      <LearningActivityGraph :days="365" :cell-size="11" />
     </div>
 
     <!-- ── 标签分类设置卡片 ── -->
@@ -591,7 +569,6 @@ import { useDocumentStore } from '../stores/document'
 import { useCourseStore } from '../stores/course'
 import { useNoteStore } from '../stores/note'
 import { useChatStore } from '../stores/chat'
-import { useQuizStore } from '../stores/quiz'
 import { useThemeStore } from '../stores/theme'
 import { useConfigStore } from '../stores/config'
 import { useToastStore } from '../stores/toast'
@@ -601,7 +578,6 @@ import { formatSize } from '../composables/useFormat'
 import CopilotBotAvatar from '@/components/CopilotBotAvatar.vue'
 import MemoryManager from '@/components/profile/MemoryManager.vue'
 import TokenUsageDashboard from '@/components/profile/TokenUsageDashboard.vue'
-import LearningActivityGraph from '@/components/profile/LearningActivityGraph.vue'
 import AchievementStage from '@/components/profile/AchievementStage.vue'
 import AchievementWallDropdown from '@/components/profile/AchievementWallDropdown.vue'
 import { getAchievement } from '@/components/profile/achievementCatalog'
@@ -622,7 +598,7 @@ import { useUserPrefs } from '@/composables/useUserPrefs'
 import { useUserAvatar } from '@/composables/useUserAvatar'
 import { validatePassword } from '@/utils/passwordPolicy'
 import {
-  Document, Reading, EditPen, ChatDotSquare, TrendCharts,
+  Document, Reading, EditPen, ChatDotSquare,
   Sunny, Moon, Edit, Setting
 } from '@/components/icons'
 import { Cpu } from '@element-plus/icons-vue'
@@ -633,7 +609,6 @@ const documentStore = useDocumentStore()
 const courseStore = useCourseStore()
 const noteStore = useNoteStore()
 const chatStore = useChatStore()
-const quizStore = useQuizStore()
 const themeStore = useThemeStore()
 const configStore = useConfigStore()
 const usageStore = useUsageStore()
@@ -774,18 +749,11 @@ async function handleShare(): Promise<void> {
 /** 按当前学习数据求值触发条件，解锁新成就 */
 function refreshAchievements(): void {
   const streakDays = markActiveToday()
-  const quizStats = quizStore.knowledgeStats
-  const totalQuizzes = Number(quizStats?.total_quizzes || 0)
-  const accuracy = Number(quizStats?.accuracy_rate || 0)
   const ctx = buildDefaultContext({
     documentCount: documentStore.documents.length,
     chatSessionCount: chatStore.sessions.length,
     noteCount: noteStore.notes.length,
     streakDays,
-    quizAnswered: totalQuizzes,
-    quizQuestionCount: totalQuizzes,
-    quizAccuracy: accuracy >= 1 ? accuracy / 100 : accuracy,
-    quizPerfect: totalQuizzes > 0 && accuracy >= 100,
     maxCourseDocCount: Math.max(
       0,
       ...courseStore.courses.map((c: { document_count?: number }) => Number(c.document_count || 0))
@@ -977,7 +945,6 @@ onMounted(async () => {
       courseStore.fetchCourses(),
       noteStore.fetchNotes(),
       chatStore.fetchSessions(),
-      quizStore.fetchKnowledgeStats(),
       usageStore.fetchDashboard(undefined, 'all'),
       configStore.fetchLLMConfig().then(cfg => {
         if (cfg) {

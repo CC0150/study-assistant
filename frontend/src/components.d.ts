@@ -60,7 +60,6 @@ declare module 'vue' {
     EvaluationLab: typeof import('./components/settings/EvaluationLab.vue')['default']
     FavoriteStar: typeof import('./components/FavoriteStar.vue')['default']
     GenerateClassroomDialog: typeof import('./components/classroom/GenerateClassroomDialog.vue')['default']
-    LearningActivityGraph: typeof import('./components/profile/LearningActivityGraph.vue')['default']
     MemoryManager: typeof import('./components/profile/MemoryManager.vue')['default']
     ModelChip: typeof import('./components/chat/ModelChip.vue')['default']
     NoteCard: typeof import('./components/NoteCard.vue')['default']

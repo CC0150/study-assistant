@@ -7,7 +7,6 @@ import { useDocumentStore } from '@/stores/document'
 import { useCourseStore } from '@/stores/course'
 import { useNoteStore } from '@/stores/note'
 import { useChatStore } from '@/stores/chat'
-import { useQuizStore } from '@/stores/quiz'
 import { useThemeStore } from '@/stores/theme'
 
 vi.mock('@/stores/toast', () => ({
@@ -73,13 +72,6 @@ describe('ProfileView Component', () => {
       { session_id: 's1', title: 'Transformer 研读', created_at: '', updated_at: '', message_count: 4 }
     ]
 
-    const quizStore = useQuizStore()
-    quizStore.knowledgeStats = {
-      total_quizzes: 25,
-      correct_count: 20,
-      accuracy_rate: 80
-    }
-
     return mount(ProfileView, {
       global: {
         stubs: {
@@ -138,9 +130,7 @@ describe('ProfileView Component', () => {
     expect(wrapper.text()).toContain('2')
     // 课程 1 个
     expect(wrapper.text()).toContain('1')
-    // 做题 25 题，正确率 80%
-    expect(wrapper.text()).toContain('25 题')
-    expect(wrapper.text()).toContain('正确率 80%')
+    expect(wrapper.text()).not.toContain('正确率')
   })
 
   it('支持切换主题并触发 themeStore', async () => {

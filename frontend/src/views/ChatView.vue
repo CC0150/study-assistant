@@ -6,7 +6,7 @@
            底色取 --bg-secondary（亮 #e9e9f2 / 暗 #0a0a0a）：
            比纯白 --surface-card 暗一档，不再是压在 #f0f0fa 页面上的"高光横档"；
            又比页面底色深一档，让工具栏与消息区保留可辨的分层。
-           与 AnalysisView / WikiView 的顶部底色取值一致。 -->
+           与其他页面的顶部底色取值一致。 -->
       <div class="border-b border-[var(--border-default)] px-4 sm:px-6 py-2.5 bg-[var(--bg-secondary)] flex items-center justify-between gap-3 overflow-x-auto">
         <div class="flex items-center gap-3 min-w-0 shrink">
           <h1 class="text-lg sm:text-xl font-semibold text-[var(--text-primary)] shrink-0">AI 问答</h1>

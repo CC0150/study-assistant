@@ -15,7 +15,6 @@ frontend/
 │   │   ├── DocumentView.vue   # Document list & management
 │   │   ├── ChatView.vue       # RAG Q&A with citations + streaming
 │   │   ├── QuizView.vue       # Quiz taking (exam & practice modes)
-│   │   ├── AnalysisView.vue   # Learning analytics dashboard
 │   │   ├── ModelConfigView.vue # LLM provider configuration
 │   │   ├── CourseListView.vue # Course space list
 │   │   ├── CourseDetailView.vue # Course detail with docs & notes
@@ -109,7 +108,6 @@ frontend/
 │   │   ├── classroom.test.ts
 │   │   └── quiz.test.js
 │   └── views/
-│       ├── AnalysisView.test.js
 │       └── ProfileView.test.js
 ├── tsconfig.json             # TypeScript configuration
 ├── tsconfig.node.json        # Node TypeScript config
@@ -199,7 +197,7 @@ The `CopilotBotAvatar` component renders bot avatars across the app, driven by a
 ### Routing
 Vue Router with lazy-loaded routes and navigation guards (15 routes):
 - Public: `/`, `/login`, `/register`
-- Auth-protected: `/upload`, `/chat`, `/quiz`, `/analysis`, `/model-config`, `/documents`, `/courses`, `/courses/:id`, `/notes`, `/tasks`, `/profile`
+- Auth-protected: `/upload`, `/chat`, `/quiz`, `/model-config`, `/documents`, `/courses`, `/courses/:id`, `/notes`, `/tasks`, `/profile`
 - Navigation guard redirects unauthenticated users to `/login`
 
 ### Styling

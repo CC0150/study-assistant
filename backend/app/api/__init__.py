@@ -1,4 +1,3 @@
-from app.api.analysis import router as analysis_router
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.classroom_api import router as classroom_router

@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.analysis import router as analysis_router
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.classroom_api import router as classroom_router
@@ -166,7 +165,6 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(document_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(quiz_router, prefix="/api")
-app.include_router(analysis_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
 app.include_router(courses_router, prefix="/api")
 app.include_router(notes_router, prefix="/api")

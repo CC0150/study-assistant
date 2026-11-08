@@ -336,7 +336,6 @@ import {
   DocumentChecked,
   Tickets,
   MagicStick,
-  TrendCharts,
   ArrowRight,
   EditPen,
   Switch,
@@ -616,14 +615,6 @@ const rawRow1Features: FeatureCardItem[] = [
     icon: DocumentChecked,
     link: '/quiz',
     widthClass: 'w-[270px] sm:w-[300px]'
-  },
-  {
-    title: '错题分析与学情雷达',
-    desc: '自动记录全量练习，AI 诊断弱项知识点分布与正确率走势，针对薄弱环节定点突击。',
-    tag: '学情诊断',
-    icon: TrendCharts,
-    link: '/analysis',
-    widthClass: 'w-[360px] sm:w-[400px]'
   },
   {
     title: '网页 URL 快速导入',

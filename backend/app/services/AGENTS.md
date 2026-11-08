@@ -35,7 +35,6 @@ Core (app/core/*.py)
 | `chat_service.py` | RAG Q&A | ask_question, ask_question_stream (fast | pipeline_v2 | deep_research), get_history |
 | `memory_service.py` | Long-term memory (WeKnora M3) | recall, search, add_item, confirm_pending, list_items |
 | `quiz_service.py` | Quiz generation | generate_quiz, submit_quiz, get_wrong_questions |
-| `analysis_service.py` | Learning analytics | analyze_wrong_questions, get_knowledge_stats, get_progress |
 | `config_service.py` | LLM configuration | get_config, update_config |
 | `note_service.py` | Notes management | create_note, update_note, delete_note, search_notes, add_tags |
 | `course_service.py` | Course spaces | create_course, update_course, list_courses, get_course_detail |

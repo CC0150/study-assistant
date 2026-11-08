@@ -6,7 +6,7 @@
       <main class="flex-1 min-w-0" :class="showSidebar ? 'md:ml-[var(--layout-sidebar-width)]' : ''">
         <router-view v-slot="{ Component }">
           <Transition name="page" mode="out-in">
-            <keep-alive :include="['QuizView', 'ChatView', 'AnalysisView']">
+            <keep-alive :include="['QuizView', 'ChatView']">
               <component :is="Component" />
             </keep-alive>
           </Transition>

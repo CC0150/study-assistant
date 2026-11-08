@@ -72,7 +72,6 @@ backend/
 │   │   └── trace.py                   # TraceIdMiddleware (X-Trace-ID propagation, structured logs via ContextVar)
 │   ├── services/                      # Business orchestration layer
 │   │   ├── __init__.py
-│   │   ├── analysis_service.py        # analyze_wrong_questions, get_knowledge_stats, get_progress
 │   │   ├── auth_service.py            # register, login, refresh_token
 │   │   ├── chat_service.py            # ask_question, stream_answer, get_history
 │   │   ├── config_service.py          # get_config, update_config
@@ -99,7 +98,6 @@ backend/
 │   ├── conftest_async.py
 │   ├── conftest_fixtures.py
 │   ├── fixtures/
-│   ├── test_analysis_service.py
 │   ├── test_api.py
 │   ├── test_auth.py
 │   ├── test_auth_service.py
@@ -342,9 +340,6 @@ pytest tests/ -v           # Run tests
 | POST | `/api/quiz/submit` | Submit quiz answers |
 | GET | `/api/quiz/result-history` | Get quiz result history |
 | GET | `/api/quiz/wrong-questions` | Get wrong questions for review |
-| GET | `/api/analysis/wrong` | Analyze wrong answers |
-| GET | `/api/analysis/knowledge` | Get knowledge stats |
-| GET | `/api/analysis/progress` | Get learning progress |
 | GET | `/api/notes` | List notes (with filters) |
 | POST | `/api/notes` | Create note |
 | GET | `/api/notes/{id}` | Get note detail |

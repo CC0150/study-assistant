@@ -157,8 +157,7 @@ class Quiz(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     # 批次9修复：课堂来源测验（AI 互动课堂导入）无关联文档，原 NOT NULL 会让
     # sync_quiz_results 的 INSERT 直接 IntegrityError（测试 SQLite 不强制
-    # FK 掩盖了该缺陷，生产 PostgreSQL 必炸）。analysis_service 已按
-    # `r.document_id or ""` 防御空值，放开可空不影响既有查询
+    # FK 掩盖了该缺陷，生产 PostgreSQL 必炸）。保留可空字段以兼容既有课堂测验记录。
     document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id"), nullable=True)
     question_type: Mapped[str] = mapped_column(String)
     question: Mapped[str] = mapped_column(Text)
