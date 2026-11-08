@@ -1,6 +1,6 @@
 # Study Copilot 项目协作说明
 
-本文件记录当前产品改造阶段需要遵守的约定，以及帮助开发者定位代码的基本信息。详细模块说明见 `backend/CLAUDE.md` 和 `frontend/CLAUDE.md`。
+本文件记录当前产品改造阶段需要遵守的约定，以及帮助开发者定位代码的基本信息。后端和前端的目录级协作说明见 `backend/AGENTS.md` 和 `frontend/AGENTS.md`；后端核心模块说明见对应目录下的 `AGENTS.md`。
 
 ## 当前产品目标
 

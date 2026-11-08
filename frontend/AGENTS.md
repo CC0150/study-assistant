@@ -1,4 +1,4 @@
-# Frontend CLAUDE.md
+# Frontend Collaboration Guide
 
 Guidance for working on the Study Copilot frontend.
 

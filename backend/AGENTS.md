@@ -1,4 +1,4 @@
-# Backend CLAUDE.md
+# Backend Collaboration Guide
 
 Guidance for working on the Study Copilot backend.
 

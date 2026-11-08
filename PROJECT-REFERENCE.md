@@ -1,4 +1,4 @@
-# Study Copilot - Root CLAUDE.md
+# Study Copilot - Codebase Reference
 
 This file provides architectural guidance for contributors working on Study Copilot.
 

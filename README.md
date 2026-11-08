@@ -106,7 +106,7 @@ flowchart TB
     API -.->|任务调度 / 双通道自愈| MAIC
 ```
 
-> 详细模块说明见 [backend/CLAUDE.md](backend/CLAUDE.md)、[frontend/CLAUDE.md](frontend/CLAUDE.md)、[docs/2-ARCHITECTURE](docs/2-ARCHITECTURE/index.md)。
+> 协作说明见 [AGENTS.md](AGENTS.md)、[backend/AGENTS.md](backend/AGENTS.md)、[frontend/AGENTS.md](frontend/AGENTS.md)；架构文档见 [docs/2-ARCHITECTURE](docs/2-ARCHITECTURE/index.md) 和 [PROJECT-REFERENCE.md](PROJECT-REFERENCE.md)。
 
 ---
 

@@ -325,7 +325,7 @@ alembic downgrade -1
 - Logs output to stdout with `[trace_id]` prefix (structured via ContextVar).
 - Set `DEBUG=True` in `.env` for verbose output.
 - Interactive docs at `http://localhost:8000/docs` (Swagger UI).
-- No email sending in the backend (CLAUDE.md compliance).
+- No email sending in the backend (project collaboration guidance).
 - All async; `asyncio.to_thread` for CPU-bound work (Docling, FAISS encoding).
 
 ### Frontend
