@@ -1,0 +1,5 @@
+[project]
+name = "study-copilot"
+version = "1.0.0"
+description = "AI-powered learning assistant with RAG, quiz generation, and progress tracking"
+requires-python = ">=3.11"

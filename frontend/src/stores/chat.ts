@@ -1,0 +1,883 @@
+import { defineStore } from 'pinia'
+import { ref, reactive } from 'vue'
+import api, { cancelAll } from '../services/api'
+import { refreshAccessToken } from '../services/authRefresh'
+import { withBase } from '../services/base'
+import { useUserPrefs } from '../composables/useUserPrefs'
+import type { Source } from '../types/models'
+
+
+/** 反思/思考步骤（后端 thinking 事件负载；4A 附带阶段窗口元数据） */
+export interface ThinkingStep {
+  step: number | string
+  detail: string
+  /** 4A: stage window id — 'understand' | 'retrieve' */
+  window?: string
+  /** 4A: stage duration in milliseconds */
+  duration_ms?: number
+  /** 4A: result / candidate count */
+  count?: number
+  /** 4A: distinct document count */
+  doc_count?: number
+  /** 4A: window_close status — done | empty | error */
+  status?: string
+}
+
+/** Persona block for discussion mode */
+export interface DiscussionPersona {
+  name: string
+  avatar: string
+  content: string
+  color?: string
+}
+
+/** Chronological turn in a multi-agent discussion timeline */
+export interface DiscussionTurn {
+  id: string
+  persona: string
+  avatar: string
+  color?: string
+  content: string
+  turn: number
+  isStreaming?: boolean
+}
+
+/** Active speaker state */
+export interface CurrentSpeaker {
+  name: string
+  avatar: string
+  color?: string
+  action?: string
+}
+
+/**
+ * 流式消息的运行时形态。
+ * 与 models.ChatMessage 的差异：thinking 在流式期间是步骤数组
+ * （models 里为 string），另携带来源索引等扩展字段。
+ */
+export interface ChatStreamMessage {
+  id: number | string
+  role: 'user' | 'assistant' | 'discussion'
+  content: string
+  sources?: Source[]
+  used_source_indices?: number[]
+  filtered_sources?: Source[]
+  expandedSources?: boolean
+  created_at?: string
+  isStreaming?: boolean
+  thinking?: string | ThinkingStep[]
+  reasoning?: string
+  saved_note?: { id: string; title: string; tags: string[] }
+  savedNote?: { id: string; title: string; tags: string[] }
+  /** Discussion mode: per-persona content (legacy compatibility) */
+  personas?: DiscussionPersona[]
+  /** Discussion mode: chronological timeline turns */
+  discussionTurns?: DiscussionTurn[]
+  /** Current active speaking agent */
+  currentSpeaker?: CurrentSpeaker | null
+  summary?: string
+  summaryStreaming?: boolean
+  error?: string
+  /** 5.5 断线续流：服务端标记未完成回答 */
+  incomplete?: boolean
+  /** 5.2 追问建议：回答下的可点后续问题 */
+  suggestions?: string[]
+  suggestionsLoading?: boolean
+}
+
+/** P0-A 空态起始问题（不挂在单条消息上） */
+
+/** 会话列表条目（后端以 session_id 为键，区别于 models.ChatSession.id） */
+export interface ChatSessionSummary {
+  session_id: string
+  title: string
+  created_at?: string
+  message_count?: number
+}
+
+/** SSE data 负载（宽松键位，按 type 分发） */
+interface SseEvent {
+  type: string
+  session_id?: string
+  stream_id?: string
+  id?: number
+  sources?: Source[]
+  filtered_sources?: Source[]
+  content?: string
+  step?: number | string
+  detail?: string
+  reasoning?: string
+  code?: string
+  message?: string
+  recoverable?: boolean
+  [key: string]: unknown
+}
+
+/** 语义搜索结果条目 */
+export interface MessageSearchResult {
+  message_id: string
+  session_id: string
+  role: string
+  content: string
+  similarity: number
+  created_at: string
+}
+
+export const useChatStore = defineStore('chat', () => {
+  const messages = ref<ChatStreamMessage[]>([])
+  const sessions = ref<ChatSessionSummary[]>([])
+  /** P0-A 空态起始问题 */
+  const starterSuggestions = ref<string[]>([])
+  const starterSuggestionsLoading = ref(false)
+  /** F9：失败标记，UI 显示重试入口而非整块静默消失 */
+  const starterSuggestionsError = ref(false)
+
+  function starterCacheKey(documentIds: string[]): string {
+    const sorted = [...documentIds].sort().join(',')
+    return `starter:${sorted}`
+  }
+
+  /** P0-A：空态起始问题。F9：sessionStorage 缓存，切文档集合即失效。 */
+  async function loadStarterSuggestions(documentIds: string[] = []): Promise<void> {
+    const key = starterCacheKey(documentIds)
+    // 命中缓存 → 不调模型
+    try {
+      const cached = sessionStorage.getItem(key)
+      if (cached) {
+        starterSuggestions.value = JSON.parse(cached)
+        starterSuggestionsError.value = false
+        return
+      }
+    } catch {
+      /* sessionStorage 不可用则忽略 */
+    }
+    // 请求去重：同一时刻只允许一个在飞
+    if (starterSuggestionsLoading.value) return
+    starterSuggestionsLoading.value = true
+    starterSuggestionsError.value = false
+    try {
+      const { data } = await api.post<{ suggestions: string[] }>('/chat/suggest-starters', {
+        document_ids: documentIds.length ? documentIds.slice(0, 20) : undefined,
+        n: 3
+      })
+      starterSuggestions.value = Array.isArray(data?.suggestions)
+        ? data.suggestions.filter(Boolean)
+        : []
+      try {
+        sessionStorage.setItem(key, JSON.stringify(starterSuggestions.value))
+      } catch {
+        /* quota */
+      }
+    } catch {
+      starterSuggestions.value = []
+      starterSuggestionsError.value = true
+    } finally {
+      starterSuggestionsLoading.value = false
+    }
+  }
+  const currentSession = ref<string | null>(null)
+  const currentSessionTitle = ref('')
+  const loading = ref(false)
+  const isStreaming = ref(false) // 是否正在流式输出
+  const abortController = ref<AbortController | null>(null) // 用于取消流式请求
+  const lastFetched = ref(0)
+  const searchResults = ref<MessageSearchResult[]>([])
+  const searchQuery = ref('')
+  const isSearching = ref(false)
+
+  function isCacheFresh(): boolean {
+    return Date.now() - lastFetched.value < 30_000
+  }
+
+  async function fetchSessions(forceRefresh = false): Promise<void> {
+    if (!forceRefresh && isCacheFresh() && sessions.value.length > 0) return
+    try {
+      const response = await api.get<ChatSessionSummary[]>('/chat/history')
+      sessions.value = response.data
+      lastFetched.value = Date.now()
+    } catch (error) {
+      console.error('Error fetching sessions:', error)
+      throw error
+    }
+  }
+
+  async function fetchHistory(sessionId: string): Promise<void> {
+    loading.value = true
+    try {
+      const response = await api.get<{ messages: (ChatStreamMessage & { discussion_turns?: DiscussionTurn[] })[] }>(
+        `/chat/history/${sessionId}`
+      )
+      messages.value = (response.data.messages || []).map(m => {
+        const savedNote = m.savedNote || (m as any).saved_note || undefined
+        return {
+          ...m,
+          savedNote,
+          saved_note: savedNote,
+          discussionTurns: m.discussionTurns || (m as any).discussion_turns || undefined,
+          // thinking 原样透传（含 4A duration_ms/count/doc_count/window/status）
+          // 重进页面 / 切会话：参考来源默认折叠，避免遮挡最新消息
+          expandedSources: false,
+          incomplete: Boolean((m as any).incomplete),
+        }
+      })
+      currentSession.value = sessionId
+      lastFetched.value = Date.now()
+    } catch (error) {
+      console.error('Error fetching history:', error)
+      throw error
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * P3-1：LLM 配置的只读回显镜像。
+   *
+   * 历史包袱说明：早期前端请求会把 key/参数发给后端，config 从 localStorage
+   * 读取且 saveConfig 会写回。安全重构（2026-08-19）后，请求不再携带任何
+   * 凭证与配置（后端服务端自行解密使用），config.saveConfig 与
+   * llmApiKey/llmBaseUrl 等 localStorage 读写链已零消费——保留只会造成
+   * 「状态源分散」的假象（四处写同一批值）。
+   *
+   * 现在它只是 configStore 拉取的服务端配置的 UI 回显（由
+   * configStore.syncToChatStore / saveLLMConfig 单向写入），
+   * 不再从 localStorage 初始化，也不再提供写回方法。
+   */
+  const config = reactive({
+    apiKey: '',
+    baseUrl: '',
+    provider: 'openrouter',
+    modelName: 'gpt-4o-mini',
+    temperature: 0.7,
+    maxTokens: 2048,
+    adapter: 'none',
+    messageFormat: 'openai'
+  })
+
+  async function askQuestion(
+    question: string,
+    documentIds: string[],
+    sessionId: string | null = null
+  ): Promise<any> {
+    loading.value = true
+
+    messages.value.push({
+      id: Date.now(),
+      role: 'user',
+      content: question,
+      created_at: new Date().toISOString()
+    })
+
+    const { prefs } = useUserPrefs()
+    try {
+      const response = await api.post('/chat/ask', {
+        question,
+        document_ids: documentIds,
+        session_id: sessionId || currentSession.value,
+        config: { ai_style: prefs.value.aiStyle },
+        stream: false // 使用非流式接口
+      })
+
+      currentSession.value = response.data.session_id
+
+      const savedNote = response.data.saved_note || response.data.savedNote
+      messages.value.push({
+        id: response.data.message_id || Date.now() + 1,
+        role: 'assistant' as const,
+        content: response.data.answer,
+        sources: response.data.sources,
+        used_source_indices: response.data.used_source_indices || [],
+        filtered_sources: response.data.filtered_sources || [],
+        saved_note: savedNote,
+        savedNote: savedNote,
+        expandedSources: false,
+        created_at: new Date().toISOString()
+      })
+
+      return response.data
+    } catch (error) {
+      console.error('Error asking question:', error)
+      throw error
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function askQuestionStream(
+    question: string,
+    documentIds: string[],
+    sessionId: string | null = null,
+    mode: 'fast' | 'deep_research' = 'fast',
+    attachmentIds: string[] = [],
+    modelOverride?: string
+  ): Promise<{ success: boolean; cancelled?: boolean }> {
+    loading.value = true
+    isStreaming.value = true
+
+    // 创建 AbortController 用于取消流式请求
+    const controller = new AbortController()
+    abortController.value = controller
+
+    // 先添加用户消息
+    messages.value.push({
+      id: Date.now(),
+      role: 'user',
+      content: question,
+      created_at: new Date().toISOString()
+    })
+
+    // 创建临时AI消息占位
+    const tempMsgId = crypto.randomUUID()
+    messages.value.push({
+      id: tempMsgId,
+      role: 'assistant',
+      content: '',
+      sources: [],
+      used_source_indices: [],
+      filtered_sources: [],
+      expandedSources: false,
+      thinking: [],
+      reasoning: '',
+      created_at: new Date().toISOString(),
+      isStreaming: true // 标记为流式加载中
+    })
+
+    const { prefs } = useUserPrefs()
+    let activeStreamId: string | null = null
+    let lastEventId = 0
+
+    const applyEvent = (data: SseEvent): boolean => {
+      if (typeof data.id === 'number') lastEventId = data.id
+      if (data.type === 'session') {
+        if (data.session_id) currentSession.value = data.session_id
+        if (typeof data.stream_id === 'string') activeStreamId = data.stream_id
+        return false
+      }
+      if (data.type === 'sources') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          const nextSources = Array.isArray(data.sources) ? data.sources : []
+          const nextFiltered = Array.isArray(data.filtered_sources) ? data.filtered_sources : []
+          messages.value[msgIdx].sources = [...nextSources]
+          messages.value[msgIdx].filtered_sources = [...nextFiltered]
+        }
+        return false
+      }
+      if (data.type === 'token') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) messages.value[msgIdx].content += data.content ?? ''
+        return false
+      }
+      if (data.type === 'answer') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) messages.value[msgIdx].content = data.content || ''
+        return false
+      }
+      if (data.type === 'thinking') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          const m = messages.value[msgIdx]
+          if (!Array.isArray(m.thinking)) m.thinking = []
+          const step: ThinkingStep = { step: data.step!, detail: data.detail! }
+          // 4A: preserve duration/counts/window/status for stage windows + history replay
+          if (typeof data.window === 'string') step.window = data.window
+          if (typeof data.duration_ms === 'number') step.duration_ms = data.duration_ms
+          if (typeof data.count === 'number') step.count = data.count
+          if (typeof data.doc_count === 'number') step.doc_count = data.doc_count
+          if (typeof data.status === 'string') step.status = data.status
+          m.thinking.push(step)
+        }
+        return false
+      }
+      if (data.type === 'reasoning') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          const m = messages.value[msgIdx]
+          m.reasoning = (m.reasoning || '') + (data.content || '')
+        }
+        return false
+      }
+      if (data.type === 'answer_refined') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          messages.value[msgIdx].content = data.content || messages.value[msgIdx].content
+        }
+        return false
+      }
+      if (data.type === 'error') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          const m = messages.value[msgIdx] as {
+            content: string
+            isStreaming?: boolean
+            error_code?: string
+            error_recoverable?: boolean
+          }
+          m.isStreaming = false
+          const errCode = typeof data.code === 'string' ? data.code : 'internal_error'
+          const recoverable = data.recoverable !== false
+          m.error_code = errCode
+          m.error_recoverable = recoverable
+          const errText = typeof data.message === 'string' ? data.message : ''
+          const fallback = recoverable
+            ? '回答生成失败，请稍后重试'
+            : '回答生成失败，需要检查模型或网络配置后重试'
+          const body = errText || fallback
+          const hint = recoverable ? '（可重试）' : '（需检查配置）'
+          m.content = m.content ? m.content + '\n\n---\n\n' + body + hint : body + hint
+        }
+        return false
+      }
+      if (data.type === 'note_saved') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1 && data.note) {
+          const noteInfo = data.note as { id: string; title: string; tags: string[] }
+          messages.value[msgIdx].saved_note = noteInfo
+          messages.value[msgIdx].savedNote = noteInfo
+        }
+        return false
+      }
+      if (data.type === 'done') {
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          messages.value[msgIdx].isStreaming = false
+          const serverMsgId = (data as { message_id?: string }).message_id
+          if (serverMsgId) messages.value[msgIdx].id = serverMsgId
+          const doneNote = (data.saved_note || data.savedNote) as
+            | { id: string; title: string; tags: string[] }
+            | undefined
+          if (doneNote) {
+            messages.value[msgIdx].saved_note = doneNote
+            messages.value[msgIdx].savedNote = doneNote
+          }
+          // 5.2 追问建议：回答完成后异步生成，不阻断流（按 id 定位，避免会话切换错挂）
+          const finished = messages.value[msgIdx]
+          if (finished.content && finished.content.trim().length > 0) {
+            void loadFollowupSuggestions(question, finished.content, finished.id)
+          }
+        }
+        if (
+          currentSession.value &&
+          !sessions.value.some(s => s.session_id === currentSession.value)
+        ) {
+          fetchSessions().catch(() => {})
+        }
+        return true
+      }
+      return false
+    }
+
+    async function doFetch(token: string | null): Promise<Response> {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      return await fetch(withBase('/api/chat/ask'), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          question,
+          document_ids: documentIds,
+          session_id: sessionId || currentSession.value,
+          config: {
+            ai_style: prefs.value.aiStyle,
+            ...(modelOverride ? { model: modelOverride, model_name: modelOverride } : {}),
+          },
+          stream: true,
+          mode,
+          agent_enabled: mode === 'deep_research',
+          attachment_ids: attachmentIds.length ? attachmentIds : undefined,
+        }),
+        signal: controller.signal
+      })
+    }
+
+    try {
+      const token = localStorage.getItem('token')
+      let response = await doFetch(token)
+
+      // Auto-refresh on 401: try refreshing the token once
+      // P1-3：复用共享 refreshAccessToken（原先此处手写了一份与 api.ts
+      // 拦截器平行的刷新逻辑，两份实现易漂移）
+      if (response.status === 401) {
+        const outcome = await refreshAccessToken()
+        if (outcome.ok && outcome.accessToken) {
+          response = await doFetch(outcome.accessToken)
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()! // 保留未完成的行
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            let data: SseEvent
+            try {
+              data = JSON.parse(line.slice(6))
+            } catch (e) {
+              console.warn('Malformed SSE data, skipping line:', line, e)
+              continue
+            }
+            applyEvent(data)
+          }
+        }
+      }
+
+      // 仅当调用方显式指定 session 时才覆盖；
+      // 否则保留后端通过 session/sources 事件下发的 currentSession
+      if (sessionId) {
+        currentSession.value = sessionId
+      }
+      return { success: true }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        // 用户主动取消，不是错误 — 保留已流式传输的内容
+        const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+        if (msgIdx !== -1) {
+          messages.value[msgIdx].isStreaming = false
+          // 5.5: 停止后部分回答仍可续流（服务端 incomplete 落库）
+          if (messages.value[msgIdx].content) {
+            messages.value[msgIdx].incomplete = true
+          }
+          // 如果没有任何内容，移除占位消息
+          if (!messages.value[msgIdx].content) {
+            messages.value = messages.value.filter(m => m.id !== tempMsgId)
+          }
+        }
+        return { success: false, cancelled: true }
+      }
+
+      // 网络中断时尝试 SSE Resume（Last-Event-ID）
+      if (activeStreamId) {
+        try {
+          const token = localStorage.getItem('token')
+          const headers: Record<string, string> = {}
+          if (token) headers['Authorization'] = `Bearer ${token}`
+          if (lastEventId > 0) headers['Last-Event-ID'] = String(lastEventId)
+          const resumeUrl = withBase(`/api/chat/stream/${activeStreamId}/resume?last_event_id=${lastEventId}`)
+          const resumeRes = await fetch(resumeUrl, { headers, signal: controller.signal })
+          if (resumeRes.ok && resumeRes.body) {
+            const rReader = resumeRes.body.getReader()
+            const rDecoder = new TextDecoder()
+            let rBuf = ''
+            while (true) {
+              const { done, value } = await rReader.read()
+              if (done) break
+              rBuf += rDecoder.decode(value, { stream: true })
+              const rLines = rBuf.split('\n')
+              rBuf = rLines.pop()!
+              for (const line of rLines) {
+                if (!line.startsWith('data: ')) continue
+                try {
+                  applyEvent(JSON.parse(line.slice(6)) as SseEvent)
+                } catch {
+                  /* skip */
+                }
+              }
+            }
+            const msgIdx = messages.value.findIndex(m => m.id === tempMsgId)
+            if (msgIdx !== -1) messages.value[msgIdx].isStreaming = false
+            if (sessionId) currentSession.value = sessionId
+            return { success: true }
+          }
+        } catch (resumeErr) {
+          console.warn('SSE resume failed:', resumeErr)
+        }
+      }
+
+      console.error('Error in streaming ask:', error)
+      // 移除临时消息
+      messages.value = messages.value.filter(m => m.id !== tempMsgId)
+      throw error
+    } finally {
+      loading.value = false
+      isStreaming.value = false
+      // 清理该流式请求产生的所有待发请求（含自动重发）
+      cancelAll()
+      abortController.value = null
+    }
+  }
+
+  function cancelStream(): void {
+    if (abortController.value) {
+      abortController.value.abort()
+    }
+  }
+
+  /** 5.5: 最后一条 assistant 是否未完成（断线续流入口） */
+  function findIncompleteMessage(): ChatStreamMessage | null {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i]
+      if (m.role === 'assistant' && (m.incomplete || m.isStreaming)) return m
+    }
+    return null
+  }
+
+  /**
+   * 5.5 断线续流：按 message_id 请求服务端续流/重放。
+   * continue 模式下 token 追加到 partial；replay 模式下 answer 覆盖全文。
+   */
+  async function resumeMessageStream(
+    messageId: string | number,
+    lastEventId = 0
+  ): Promise<{ success: boolean; cancelled?: boolean }> {
+    const msgIdx = messages.value.findIndex(m => m.id === messageId)
+    if (msgIdx === -1) return { success: false }
+
+    loading.value = true
+    isStreaming.value = true
+    const controller = new AbortController()
+    abortController.value = controller
+    messages.value[msgIdx].isStreaming = true
+
+    try {
+      const token = localStorage.getItem('token')
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const url = withBase(`/api/chat/messages/${messageId}/resume?last_event_id=${lastEventId}`)
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let mode: 'continue' | 'replay' = 'continue'
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()!
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          let data: SseEvent
+          try {
+            data = JSON.parse(line.slice(6))
+          } catch {
+            continue
+          }
+          if (data.type === 'resume_mode') {
+            mode = (data as { mode?: string }).mode === 'replay' ? 'replay' : 'continue'
+            continue
+          }
+          if (data.type === 'resume_pending') {
+            // 服务端流仍在进行 — 交由 /stream/{id}/resume
+            messages.value[msgIdx].isStreaming = false
+            messages.value[msgIdx].incomplete = true
+            return { success: true }
+          }
+          if (data.type === 'token') {
+            messages.value[msgIdx].content += data.content ?? ''
+            continue
+          }
+          if (data.type === 'answer' || data.type === 'answer_refined') {
+            messages.value[msgIdx].content = data.content || messages.value[msgIdx].content
+            continue
+          }
+          if (data.type === 'reasoning') {
+            const m = messages.value[msgIdx]
+            m.reasoning = (m.reasoning || '') + (data.content || '')
+            continue
+          }
+          if (data.type === 'error') {
+            const errText = typeof data.message === 'string' ? data.message : '续写失败'
+            const m = messages.value[msgIdx]
+            m.content = m.content ? m.content + '\n\n---\n\n' + errText : errText
+            continue
+          }
+          if (data.type === 'done') {
+            messages.value[msgIdx].isStreaming = false
+            messages.value[msgIdx].incomplete = false
+            const serverMsgId = (data as { message_id?: string }).message_id
+            if (serverMsgId) messages.value[msgIdx].id = serverMsgId
+            return { success: true }
+          }
+          void mode
+        }
+      }
+      messages.value[msgIdx].isStreaming = false
+      messages.value[msgIdx].incomplete = false
+      return { success: true }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        messages.value[msgIdx].isStreaming = false
+        messages.value[msgIdx].incomplete = Boolean(messages.value[msgIdx].content)
+        return { success: false, cancelled: true }
+      }
+      messages.value[msgIdx].isStreaming = false
+      console.error('Error resuming message stream:', error)
+      return { success: false }
+    } finally {
+      loading.value = false
+      isStreaming.value = false
+      abortController.value = null
+    }
+  }
+
+  /**
+   * 5.5 挂载自愈：若最后一条 assistant 未完成则自动续流。
+   * 返回是否触发了续流。
+   */
+  async function tryResumeIncomplete(): Promise<boolean> {
+    const target = findIncompleteMessage()
+    if (!target || target.isStreaming) return false
+    if (!target.id || typeof target.id !== 'string') return false
+    await resumeMessageStream(target.id)
+    return true
+  }
+
+  async function deleteSession(sessionId: string): Promise<void> {
+    try {
+      await api.delete(`/chat/history/${sessionId}`)
+      sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
+    } catch (error) {
+      console.error('Error deleting session:', error)
+      throw error
+    }
+  }
+
+  async function updateSessionTitle(sessionId: string, title: string): Promise<void> {
+    try {
+      await api.put(`/chat/history/${sessionId}`, { title })
+      const session = sessions.value.find(s => s.session_id === sessionId)
+      if (session) {
+        session.title = title
+      }
+    } catch (error) {
+      console.error('Error updating session title:', error)
+      throw error
+    }
+  }
+
+  function clearMessages(): void {
+    messages.value = []
+  }
+
+  async function searchMessages(query: string, sessionId: string | null = null): Promise<void> {
+    if (!query || !query.trim()) {
+      searchResults.value = []
+      searchQuery.value = ''
+      return
+    }
+    isSearching.value = true
+    searchQuery.value = query
+    try {
+      const response = await api.post<MessageSearchResult[]>('/chat/search', {
+        query: query.trim(),
+        session_id: sessionId,
+        top_k: 10,
+      })
+      searchResults.value = response.data
+    } catch (error) {
+      console.error('Error searching messages:', error)
+      searchResults.value = []
+      throw error
+    } finally {
+      isSearching.value = false
+    }
+  }
+
+  function clearSearch(): void {
+    searchResults.value = []
+    searchQuery.value = ''
+  }
+
+  /** 5.2 追问建议：按问题+回答向服务端取 3 条可点后续问题并挂到消息上 */
+  /** 5.2 追问建议：按问题+回答向服务端取 3 条可点后续问题并挂到消息上（按 id 定位） */
+  async function loadFollowupSuggestions(
+    question: string,
+    answer: string,
+    messageId: string | number
+  ): Promise<void> {
+    if (!question?.trim() || !answer?.trim()) return
+    const target = () => messages.value.find(m => m.id === messageId)
+    if (!target()) return
+    target()!.suggestionsLoading = true
+    try {
+      const { data } = await api.post<{ suggestions: string[] }>('/chat/suggest-followups', {
+        question,
+        answer,
+        n: 3
+      })
+      const list = Array.isArray(data?.suggestions) ? data.suggestions.filter(Boolean) : []
+      const msg = target()
+      if (msg) {
+        msg.suggestions = list
+        msg.suggestionsLoading = false
+      }
+    } catch (err) {
+      console.warn('followup suggestions failed:', err)
+      const msg = target()
+      if (msg) msg.suggestionsLoading = false
+    }
+  }
+
+  async function saveMessageAsNote(messageId: string | number): Promise<{ id: string; title: string; tags: string[] }> {
+    try {
+      const response = await api.post<{ success: boolean; note: { id: string; title: string; tags: string[] } }>(
+        `/chat/messages/${messageId}/save-note`
+      )
+      const note = response.data.note
+      const msg = messages.value.find(m => m.id === messageId)
+      if (msg) {
+        msg.saved_note = note
+        msg.savedNote = note
+      }
+      return note
+    } catch (error) {
+      console.error('Error saving message as note:', error)
+      throw error
+    }
+  }
+
+  return {
+    messages,
+    sessions,
+    currentSession,
+    currentSessionTitle,
+    loading,
+    config,
+    lastFetched,
+    searchResults,
+    searchQuery,
+    isSearching,
+    starterSuggestions,
+    starterSuggestionsError,
+    starterSuggestionsLoading,
+    fetchSessions,
+    fetchHistory,
+    askQuestion,
+    askQuestionStream,
+    cancelStream,
+    deleteSession,
+    updateSessionTitle,
+    clearMessages,
+    clearSearch,
+    searchMessages,
+    saveMessageAsNote,
+    loadFollowupSuggestions,
+    loadStarterSuggestions,
+    findIncompleteMessage,
+    resumeMessageStream,
+    tryResumeIncomplete,
+    isStreaming
+  }
+})

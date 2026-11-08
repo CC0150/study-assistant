@@ -1,0 +1,189 @@
+<template>
+  <header class="fixed top-0 left-0 right-0 h-[var(--layout-header-height)] bg-[var(--bg-primary)] border-b border-[var(--border-default)] z-50 transition-colors duration-200">
+    <div class="flex items-center justify-between h-full px-4 md:px-6">
+      <div class="flex items-center gap-3">
+        <button
+          v-if="showSidebar"
+          aria-label="打开菜单"
+          class="md:hidden p-2 -ml-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          @click="sidebarStore.toggle()"
+        >
+          <el-icon class="w-6 h-6"><Fold /></el-icon>
+        </button>
+        <router-link to="/" class="flex items-center gap-2">
+          <CopilotBotAvatar :size="48" :mood="headerBotMood" class="header-bot-flip" />
+          <span class="text-lg font-semibold text-[var(--text-primary)] hidden sm:inline">Study Copilot</span>
+        </router-link>
+      </div>
+
+      <div class="flex items-center gap-2 md:gap-4">
+        <el-button
+          circle
+          size="small"
+          aria-label="切换主题"
+          @click="themeStore.toggleTheme()"
+        >
+          <el-icon class="w-5 h-5">
+            <Setting v-if="themeStore.isSystem" />
+            <Moon v-else-if="themeStore.isDark" />
+            <Sunny v-else />
+          </el-icon>
+        </el-button>
+
+        <NotificationBell v-if="authStore.isAuthenticated" />
+
+        <template v-if="authStore.isAuthenticated">
+          <el-dropdown trigger="click" @command="handleCommand">
+            <span
+              class="flex items-center gap-2 cursor-pointer rounded-md px-1.5 py-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+              aria-label="用户菜单"
+            >
+              <!-- 头像展现：支持自定义上传图片、Copilot 机器人与首字母渐变 -->
+              <img
+                v-if="prefs.avatarType === 'custom' && prefs.customAvatar"
+                :src="prefs.customAvatar"
+                alt="头像"
+                class="w-7 h-7 rounded-full object-cover border border-[var(--border-default)] shadow-xs flex-shrink-0"
+              />
+              <span
+                v-else-if="prefs.avatarType === 'bot'"
+                class="w-7 h-7 rounded-full bg-[var(--bg-secondary)] border border-[var(--border-default)] flex items-center justify-center overflow-hidden flex-shrink-0"
+              >
+                <CopilotBotAvatar :size="24" mood="idle" />
+              </span>
+              <span
+                v-else
+                class="w-7 h-7 rounded-full bg-gradient-to-br from-[var(--color-brand-from)] to-[var(--color-brand-to)]
+                       flex items-center justify-center text-xs font-semibold text-[var(--text-inverse)] flex-shrink-0"
+                aria-hidden="true"
+              >{{ avatarLetter }}</span>
+              <span class="text-sm hidden md:inline">{{ authStore.user?.username }}</span>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="profile">
+                  <el-icon class="mr-1"><User /></el-icon>个人设置
+                </el-dropdown-item>
+                <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
+        <template v-else>
+          <router-link to="/login">
+            <el-button text>登录</el-button>
+          </router-link>
+          <router-link to="/register">
+            <el-button type="primary" size="small">注册</el-button>
+          </router-link>
+        </template>
+      </div>
+    </div>
+  </header>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import gsap from 'gsap'
+import { useAuthStore } from '../../stores/auth'
+import { useSidebarStore } from '../../stores/sidebar'
+import { useThemeStore } from '../../stores/theme'
+import { useRouter } from 'vue-router'
+import { User, Sunny, Moon, Setting, Fold } from '@/components/icons'
+import CopilotBotAvatar, { type BotMood } from '@/components/CopilotBotAvatar.vue'
+import NotificationBell from '@/components/common/NotificationBell.vue'
+import { useUserPrefs } from '@/composables/useUserPrefs'
+import { useUserAvatar } from '@/composables/useUserAvatar'
+import { useReducedMotion } from '@/composables/useReducedMotion'
+import { takeLoginHandoffRect } from '@/utils/loginHandoff'
+
+const authStore = useAuthStore()
+const sidebarStore = useSidebarStore()
+const themeStore = useThemeStore()
+const router = useRouter()
+const { prefs } = useUserPrefs()
+
+const headerBotMood = ref<BotMood>('idle')
+let headerIdleTimer: ReturnType<typeof setTimeout> | null = null
+
+function onActivity(): void {
+  if (headerBotMood.value === 'sleep') {
+    headerBotMood.value = 'idle'
+  }
+  if (headerIdleTimer) clearTimeout(headerIdleTimer)
+  if (prefs.value.botIdleSleep) {
+    headerIdleTimer = setTimeout(() => {
+      headerBotMood.value = 'sleep'
+    }, 60_000) // 60s 无任何指针或按键交互进入呼吸睡眠微动画
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('pointerdown', onActivity, { passive: true })
+  window.addEventListener('keydown', onActivity, { passive: true })
+  onActivity()
+  playLoginHandoffFlip()
+})
+
+/** 登录成功交接：从登录页 bot 位置 FLIP 到顶栏 logo */
+function playLoginHandoffFlip(): void {
+  if (useReducedMotion().prefersReduced.value) {
+    takeLoginHandoffRect()
+    return
+  }
+  nextTick(() => {
+    const from = takeLoginHandoffRect()
+    if (!from) return
+    const el = document.querySelector('.header-bot-flip') as HTMLElement | null
+    if (!el) return
+    try {
+      const to = el.getBoundingClientRect()
+      if (!to.width) return
+      const dx = from.left + from.width / 2 - (to.left + to.width / 2)
+      const dy = from.top + from.height / 2 - (to.top + to.height / 2)
+      const scale = from.width / to.width
+      gsap.from(el, {
+        x: dx,
+        y: dy,
+        scale,
+        duration: 0.7,
+        ease: 'power3.inOut',
+        clearProps: 'x,y,scale',
+      })
+      headerBotMood.value = 'arrive'
+    } catch {
+      /* rect 失败则直接落位 */
+    }
+  })
+}
+
+onBeforeUnmount(() => {
+  if (headerIdleTimer) clearTimeout(headerIdleTimer)
+  window.removeEventListener('pointerdown', onActivity)
+  window.removeEventListener('keydown', onActivity)
+})
+
+/** 批次4：头像首字符（规则见 useUserAvatar，与 ProfileView 同源） */
+const { avatarLetter } = useUserAvatar()
+
+const showSidebar = computed(() => {
+  return router.currentRoute.value.path !== '/login' && router.currentRoute.value.path !== '/register'
+})
+
+function handleCommand(command: string | number | object): void {
+  if (command === 'profile') {
+    router.push('/profile')
+  } else if (command === 'logout') {
+    authStore.logout()
+    router.push('/login')
+  }
+}
+</script>
+
+<style scoped>
+/* 登录成功 FLIP：SVG 缩放需绕中心 */
+.header-bot-flip :deep(svg) {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+</style>

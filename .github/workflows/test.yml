@@ -1,0 +1,145 @@
+name: CI Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    # Unit tests use SQLite (tests/conftest.py + DATABASE_URL below).
+    # A PostgreSQL service is not required for the current suite.
+
+    env:
+      # Unit tests use SQLite fixtures in tests/conftest.py.
+      DATABASE_URL: sqlite+aiosqlite:///./ci-test.db
+      JWT_SECRET_KEY: ci-test-secret-key
+      OPENAI_API_KEY: sk-dummy
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      OPENAI_MODEL: gpt-3.5-turbo
+      # Valid Fernet key (tests must not depend on a developer machine secret)
+      ENCRYPTION_KEY: m6577GFSHBCYck63gksojMSWoolIXIRMIi8jEWiULTo=
+      # Offline: tests must not download HuggingFace models on the Runner
+      HF_HUB_OFFLINE: "1"
+      CI: "true"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # Ubuntu 24.04 runners renamed/removed libgl1-mesa-glx; try new names first
+          sudo apt-get install -y libgl1 libglib2.0-0t64 || \
+            sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies with uv
+        working-directory: backend
+        run: |
+          # Install into the setup-python environment (not a separate uv venv)
+          uv pip install --system -e '.[dev]'
+
+      - name: Ruff lint check
+        working-directory: backend
+        run: |
+          # Use the same interpreter that received --system installs.
+          # `uv run` would prefer a project .venv and may not see system packages.
+          python -m ruff check app/ --output-format=github
+
+      - name: Type check with mypy
+        working-directory: backend
+        run: |
+          python -m mypy app
+
+      - name: Run backend tests with coverage
+        working-directory: backend
+        run: |
+          set -o pipefail
+          python -c "import sys; print(sys.version)"
+          python -m pytest tests/ -q --tb=line \
+            --cov=app --cov-report=xml --cov-report=term --cov-fail-under=65 \
+            | tee /tmp/pytest-out.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Backend pytest exit=$status"
+            echo '#### Failed tests'
+            echo '```'
+            grep -E '^(FAILED|ERROR)|assert |Error:|coverage' /tmp/pytest-out.txt | tail -n 80 || true
+            echo '```'
+            echo '#### Tail'
+            echo '```'
+            tail -n 40 /tmp/pytest-out.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Upload backend coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+          fail_ci_if_error: false
+
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: frontend
+        run: npx vue-tsc --noEmit
+
+      - name: Production build check
+        working-directory: frontend
+        run: npm run build
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+
+  all-tests-pass:
+    name: All Tests Passed
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.backend-tests.result }}" != "success" ] || [ "${{ needs.frontend-tests.result }}" != "success" ]; then
+            echo "Backend: ${{ needs.backend-tests.result }}"
+            echo "Frontend: ${{ needs.frontend-tests.result }}"
+            exit 1
+          fi
+          echo "All tests passed!"

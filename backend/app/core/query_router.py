@@ -1,0 +1,275 @@
+"""
+Query Router — 查询意图分类 + 上下文感知改写（合并为一步）
+
+一次 LLM 调用同时完成：
+1. 判断问题类型（rag_qa / direct / summary / out_of_scope）
+2. 如果问题依赖对话历史，改写为独立问题
+
+设计参考：open-notebook 的简洁方案（LLM 自行理解上下文）
+"""
+
+import asyncio
+import json
+import logging
+from enum import Enum
+
+from app.core.llm import LLM
+from app.core.template_manager import render_template
+from app.core.tracing import observe_span
+
+logger = logging.getLogger(__name__)
+
+
+class QueryType(str, Enum):
+    RAG_QA = "rag_qa"
+    DIRECT_ANSWER = "direct"
+    SUMMARY = "summary"
+    NOTE_TAKING = "note_taking"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+# ── 关键词规则（优先级高于 LLM，节省一次调用） ──────────────────────
+
+_NOTE_TAKING_KEYWORDS = [
+    "记笔记",
+    "记成笔记",
+    "存为笔记",
+    "保存笔记",
+    "保存为笔记",
+    "记录笔记",
+    "记录为笔记",
+    "整理成笔记",
+    "整理笔记",
+    "写入笔记",
+    "写进笔记",
+    "生成笔记",
+    "做笔记",
+    "做一份笔记",
+    "做学习笔记",
+    "学习笔记",
+    "记入笔记",
+    "存入笔记",
+    "转为笔记",
+    "提炼为笔记",
+]
+
+_SUMMARY_KEYWORDS = [
+    "总结",
+    "概述",
+    "概要",
+    "摘要",
+    "大纲",
+    "总结一下",
+    "帮我总结",
+    "概括",
+    "归纳",
+    "全文总结",
+    "内容概要",
+    "主要讲了什么",
+    "说了什么",
+    "讲了什么",
+    "主要内容",
+]
+
+_CHITCHAT_KEYWORDS = [
+    "你好",
+    "你是谁",
+    "谢谢",
+    "再见",
+    "哈哈",
+    "嗯嗯",
+    "好的",
+    "ok",
+    "OK",
+    "hi",
+    "hello",
+    "早上好",
+    "晚上好",
+    "下午好",
+]
+
+
+class QueryAnalysis:
+    """查询分析结果"""
+
+    def __init__(self, intent: QueryType, standalone_query: str):
+        self.intent = intent
+        self.standalone_query = standalone_query
+
+
+class QueryRouter:
+    """查询路由器 — 规则优先 + LLM 兜底（同时输出意图和改写查询）"""
+
+    ANALYZE_PROMPT = (
+        "你是一个查询分析器。根据用户问题和对话历史，完成两个任务：\n\n"
+        "1. 判断问题类型：\n"
+        "   - rag_qa: 基于文档内容的具体问答（需要检索相关段落）\n"
+        '   - direct: 通用概念解释，不需要文档（如"什么是Python"）\n'
+        "   - summary: 要求总结/概述整个文档\n"
+        '   - note_taking: 要求整理、提炼或保存为学习笔记（如"帮我整理成笔记"、"存入笔记"）\n'
+        "   - out_of_scope: 闲聊或与学习无关的问题\n\n"
+        "2. 如果问题依赖对话历史（含代词、省略、指代），改写为独立完整的问题。\n"
+        "   如果不依赖历史，保持原样。\n\n"
+        "输出 JSON 格式：\n"
+        '{{"intent": "rag_qa", "standalone_query": "改写后的独立问题"}}\n\n'
+        "{history_text}"
+        "用户问题：{query}\n\n"
+        "分析结果："
+    )
+
+    def __init__(self) -> None:
+        pass
+
+    @observe_span(name="rag.query_router.analyze")
+    async def analyze(
+        self,
+        query: str,
+        doc_ids: list[str],
+        history: list[dict] | None = None,
+        llm: LLM | None = None,
+    ) -> QueryAnalysis:
+        """分析查询意图，同时处理上下文改写。
+
+        Returns:
+            QueryAnalysis(intent, standalone_query)
+        """
+        query_stripped = query.strip()
+
+        # ── 规则 1：闲聊 ──
+        if query_stripped in _CHITCHAT_KEYWORDS:
+            logger.info("[Router] Chitchat detected → OUT_OF_SCOPE")
+            return QueryAnalysis(QueryType.OUT_OF_SCOPE, query_stripped)
+
+        # ── 规则 2：笔记记录类（优先命中关键词，无历史时直接判定） ──
+        if any(kw in query_stripped for kw in _NOTE_TAKING_KEYWORDS):
+            logger.info("[Router] Note taking keywords detected")
+            if not history or len(history) == 0:
+                return QueryAnalysis(QueryType.NOTE_TAKING, query_stripped)
+
+        # ── 规则 3：没有文档且非记笔记 → 直接回答 ──
+        if not doc_ids and not any(kw in query_stripped for kw in _NOTE_TAKING_KEYWORDS):
+            logger.info("[Router] No documents → DIRECT_ANSWER")
+            return QueryAnalysis(QueryType.DIRECT_ANSWER, query_stripped)
+
+        # ── 规则 4：总结类 ──
+        if any(kw in query_stripped for kw in _SUMMARY_KEYWORDS):
+            logger.info("[Router] Summary keywords → SUMMARY")
+            return QueryAnalysis(QueryType.SUMMARY, query_stripped)
+
+        # ── 规则 5：无可用 LLM → 与 _classify_intent 相同的兜底语义 ──
+        if llm is None:
+            if any(kw in query_stripped for kw in _NOTE_TAKING_KEYWORDS):
+                return QueryAnalysis(QueryType.NOTE_TAKING, query_stripped)
+            logger.info("[Router] No LLM configured → RAG_QA with original query")
+            return QueryAnalysis(QueryType.RAG_QA, query_stripped)
+
+        # ── 规则 6：没有历史 → 不需要改写，直接走 LLM 分类 ──
+        if not history or len(history) == 0:
+            intent = await self._classify_intent(query_stripped, llm)
+            return QueryAnalysis(intent, query_stripped)
+
+        # ── 有历史 → 用 LLM 同时分类 + 改写 ──
+        try:
+            # 构建历史文本（最近 5 条）
+            recent = history[-5:]
+            history_parts = []
+            for msg in recent:
+                role = "用户" if msg.get("role") == "user" else "AI"
+                content = msg.get("content", "")[:200]
+                history_parts.append(f"{role}: {content}")
+            history_text = "对话历史：\n" + "\n".join(history_parts) + "\n\n"
+
+            prompt = self.ANALYZE_PROMPT.format(history_text=history_text, query=query_stripped)
+            # 路由属轻量决策：15s 内未响应即降级为规则路径，避免拖死整条流
+            response = await asyncio.wait_for(
+                llm.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=200,
+                ),
+                timeout=10.0,
+            )
+            return self._parse_response(response, query_stripped)
+
+        except Exception as e:
+            logger.warning("[Router] LLM analysis failed: %s, defaulting", e)
+            if any(kw in query_stripped for kw in _NOTE_TAKING_KEYWORDS):
+                return QueryAnalysis(QueryType.NOTE_TAKING, query_stripped)
+            return QueryAnalysis(QueryType.RAG_QA, query_stripped)
+
+    async def _classify_intent(self, query: str, llm: LLM | None = None) -> QueryType:
+        """简单分类（无历史时使用）"""
+        if llm is None:
+            # 没有 LLM 实例，用规则兜底
+            if any(kw in query.strip() for kw in _NOTE_TAKING_KEYWORDS):
+                return QueryType.NOTE_TAKING
+            return QueryType.RAG_QA
+
+        try:
+            prompt = render_template("router/classify_intent.jinja2", query=query)
+            response = await asyncio.wait_for(
+                llm.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=10,
+                ),
+                timeout=10.0,
+            )
+            response = (response or "").strip().lower()
+
+            if "note_taking" in response or "note" in response:
+                return QueryType.NOTE_TAKING
+            elif "summary" in response:
+                return QueryType.SUMMARY
+            elif "direct" in response:
+                return QueryType.DIRECT_ANSWER
+            elif "out_of_scope" in response:
+                return QueryType.OUT_OF_SCOPE
+            else:
+                return QueryType.RAG_QA
+
+        except Exception as e:
+            logger.warning("[Router] Intent classification failed: %s", e)
+            return QueryType.RAG_QA
+
+    def _parse_response(self, response: str, original_query: str) -> QueryAnalysis:
+        """解析 LLM 返回的 JSON"""
+        response = response.strip()
+
+        # 尝试直接解析 JSON
+        try:
+            data = json.loads(response)
+            intent_str = data.get("intent", "rag_qa")
+            standalone = data.get("standalone_query", original_query)
+            intent = (
+                QueryType(intent_str)
+                if intent_str in [e.value for e in QueryType]
+                else QueryType.RAG_QA
+            )
+            return QueryAnalysis(intent, standalone or original_query)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 尝试提取 JSON 块
+        if "{" in response and "}" in response:
+            start = response.index("{")
+            end = response.rindex("}") + 1
+            try:
+                data = json.loads(response[start:end])
+                intent_str = data.get("intent", "rag_qa")
+                standalone = data.get("standalone_query", original_query)
+                intent = (
+                    QueryType(intent_str)
+                    if intent_str in [e.value for e in QueryType]
+                    else QueryType.RAG_QA
+                )
+                return QueryAnalysis(intent, standalone or original_query)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 解析失败，用规则判断意图
+        logger.warning("[Router] Failed to parse LLM response: %s", response[:100])
+        return QueryAnalysis(QueryType.RAG_QA, original_query)
+
+
+query_router = QueryRouter()

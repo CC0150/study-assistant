@@ -1,0 +1,79 @@
+@import './variables.css';
+@tailwind utilities;
+
+/* ==================== 微观质感（样式精修批次2，纯增量） ==================== */
+
+/* 滚动条：令牌驱动，双主题自动适配（原浏览器默认在暗色下是刺眼白条） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-active) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-active);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: content-box;
+}
+
+/* 文本选中色：黑白单色系。
+   primary 混 bg-primary 而非 transparent——暗色纯白主色下
+   transparent 混出灰白雾，改与画布混色收敛为可读的深浅灰 */
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 20%, var(--bg-primary));
+  color: var(--text-primary);
+}
+
+/* 统一键盘焦点环（触屏不受影响） */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* 侧栏导航 active 胶囊：背景指示 + 加粗（原仅文字变色，导航迷失感） */
+.el-menu-item.is-active {
+  background-color: var(--color-primary-light);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+}
+.el-menu-item:hover {
+  border-radius: var(--radius-md);
+}
+
+/* el-tabs active 加粗：tab 层级更明确（配合批次3 的 el-tabs 替换） */
+.el-tabs__item.is-active {
+  font-weight: 600;
+}
+
+/* ==================== Reicon 图标迁移（批次：reicon-migrate） ==================== */
+
+/* Loading 旋转动画：reicon refresh 图标替换 EP Loading 后保持原旋转语义 */
+.reicon-spin {
+  animation: reicon-spin 1s linear infinite;
+  transform-origin: center;
+}
+@keyframes reicon-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* P1-1（§6.B）：减少动态偏好下停用无限旋转（前庭触发源），保留静态图标 */
+@media (prefers-reduced-motion: reduce) {
+  .reicon-spin {
+    animation: none;
+  }
+}

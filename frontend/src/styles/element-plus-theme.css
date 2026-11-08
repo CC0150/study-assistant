@@ -1,0 +1,316 @@
+/* Element Plus 自定义主题变量 - CSS 变量覆盖 */
+/* Element Plus 2.3+ 支持 CSS 变量主题定制，无需 SCSS */
+/* 级联修复：EP 的 base.css 也在 :root 上定义 --el-color-primary 等默认值。
+   dev 模式下 EP 组件样式经 App.vue 晚于本文件注入（生产构建则恰好相反），
+   同特异性 (0,1,0) 时后注入者胜——导致覆盖时灵时不灵。
+   用 html:root (0,1,1) 提升特异性，压过 EP 的 :root，与注入顺序解耦 */
+
+html:root {
+  --el-color-primary: var(--color-primary);
+  /* primary-light-3 = 按钮 hover 档。黑白主色下彩色的 mix 公式失效
+     （黑主色混白变浅灰，hover 方向反了），钉到 hover 令牌保持方向 */
+  --el-color-primary-light-3: var(--color-primary-hover);
+  --el-color-primary-light-5: color-mix(in srgb, var(--color-primary) 40%, var(--bg-primary));
+  --el-color-primary-light-7: color-mix(in srgb, var(--color-primary) 25%, var(--bg-primary));
+  --el-color-primary-light-9: var(--color-primary-light);
+  --el-color-primary-dark-2: var(--color-primary-hover);
+
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-error);
+  --el-color-info: var(--color-info);
+  /* 状态浅档（el-message 背景 / tag 浅描边取这些）钉到令牌 tint，
+     替代 EP 默认的彩色 light-5/8/9 */
+  --el-color-success-light-5: color-mix(in srgb, var(--color-success) 35%, var(--surface-card));
+  --el-color-success-light-8: var(--color-success-light);
+  --el-color-success-light-9: var(--color-success-light);
+  --el-color-warning-light-5: color-mix(in srgb, var(--color-warning) 35%, var(--surface-card));
+  --el-color-warning-light-8: var(--color-warning-light);
+  --el-color-warning-light-9: var(--color-warning-light);
+  --el-color-error-light-5: color-mix(in srgb, var(--color-error) 35%, var(--surface-card));
+  --el-color-error-light-8: var(--color-error-light);
+  --el-color-error-light-9: var(--color-error-light);
+  --el-color-danger-light-5: color-mix(in srgb, var(--color-error) 35%, var(--surface-card));
+  --el-color-danger-light-8: var(--color-error-light);
+  --el-color-danger-light-9: var(--color-error-light);
+  --el-color-info-light-5: color-mix(in srgb, var(--color-info) 35%, var(--surface-card));
+  --el-color-info-light-8: var(--color-primary-light);
+  --el-color-info-light-9: var(--color-primary-light);
+
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-secondary);
+  --el-text-color-secondary: var(--text-muted);
+  --el-text-color-placeholder: var(--text-muted);
+
+  --el-border-color: var(--border-default);
+  --el-border-color-light: var(--border-default);
+  --el-border-color-lighter: var(--bg-tertiary);
+  --el-border-color-hover: var(--border-hover);
+
+  --el-bg-color: var(--bg-primary);
+  --el-bg-color-page: var(--bg-secondary);
+  --el-bg-color-overlay: var(--surface-card);
+
+  /* 黑白单色系（DESIGN.md）：EP 的 fill 系映射到冷调近白/墨色分层，
+     替代默认的暖灰蓝 fill（亮色下 base.css 默认值恰好也是白系，
+     这里显式钉住防上游漂移） */
+  --el-color-white: var(--text-inverse);
+  --el-fill-color: var(--bg-tertiary);
+  --el-fill-color-blank: var(--surface-card);
+  --el-fill-color-light: var(--bg-primary);
+  --el-fill-color-lighter: var(--bg-secondary);
+  --el-fill-color-extra-light: var(--bg-secondary);
+  --el-fill-color-dark: var(--bg-hover);
+  --el-fill-color-darker: var(--bg-active);
+  --el-disabled-bg-color: var(--bg-secondary);
+  --el-disabled-text-color: var(--text-muted);
+  --el-disabled-border-color: var(--border-default);
+
+  /* Pagination 专用令牌（亮色） */
+  --el-pagination-font-size: 13px;
+  --el-pagination-bg-color: var(--surface-card);
+  --el-pagination-text-color: var(--text-primary);
+  --el-pagination-button-color: var(--text-secondary);
+  --el-pagination-button-bg-color: var(--bg-tertiary);
+  --el-pagination-button-disabled-color: var(--text-muted);
+  --el-pagination-button-disabled-bg-color: var(--bg-secondary);
+  --el-pagination-hover-color: var(--color-primary);
+  --el-pagination-border-radius: var(--radius-sm);
+
+  /* 黑白单色系下，EP 白字硬编码的填充式控件前景按主题反转：
+     亮色 = 墨色底白字（黑按钮）；暗色 = 白底墨字（白按钮）。
+     --el-color-white 映射 text-inverse 后，button-primary/checkbox/
+     radio/pagination/segmented 自动取反色前景，无需逐组件覆盖 */
+  --el-button-text-color: var(--text-primary);
+
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-small: var(--radius-xs);
+  /* 精修（批次1d）：弹窗与卡片同级（20px），修复"弹窗比卡片还不圆"的层级倒挂 */
+  --el-dialog-border-radius: var(--radius-xl);
+
+  --el-box-shadow: var(--shadow-card);
+  --el-box-shadow-light: var(--shadow-sm);
+  --el-box-shadow-dark: var(--shadow-md);
+
+  /* 遮罩：EP 默认近白（#ffffffe6），纯黑暗色画布上会成白雾。
+     映射到主题 overlay 令牌，随主题反转 */
+  --el-mask-color: var(--surface-overlay);
+  --el-mask-color-extra-light: rgba(0, 0, 0, 0.25);
+
+  /* Input 阴影减弱 */
+  --el-input-shadow: inset 0 0 0 1px var(--el-border-color);
+  --el-input-shadow-focus: inset 0 0 0 1px var(--el-color-primary);
+  --el-input-shadow-hover: inset 0 0 0 1px var(--el-border-color-hover);
+  --el-textarea-shadow: inset 0 0 0 1px var(--el-border-color);
+  --el-textarea-shadow-focus: inset 0 0 0 1px var(--el-color-primary);
+}
+
+/* 黑白单色系：EP 组件内部硬编码 var(--el-color-white) 的场景修正。
+   该值在"选中态前景"上应为主色上的反色文字（墨底→白字 / 白底→墨字），
+   而非恒定白。--el-color-white 已映射 var(--text-inverse)：
+   亮色 #fff（黑按钮白字）、暗色 #000（白按钮黑字），组件自动跟随。
+   checkbox 勾/radio 点/pagination active 页码/switch 旋钮等全部自愈。
+   以下仅覆盖仍取固定白的残余场景（如 slider 按钮底色取卡片色）。 */
+.el-slider__button {
+  background-color: var(--surface-card);
+}
+
+/* focus ring 用主色发丝线，双主题各自反转后仍保持可感知 */
+.el-radio-button__original-radio:focus-visible + .el-radio-button__inner {
+  outline-color: var(--color-primary);
+}
+
+/* 侧栏菜单：hover 与 active 分层。
+   EP 默认 hover 取 primary-light-9，与 global.css 的 .is-active 胶囊
+   （color-primary-light）同色——悬停时无法分辨"我在哪"。
+   hover 改走 bg-hover（更浅一档），active 仍是主色浅底胶囊 */
+html:root .el-menu-item:not(.is-active):hover {
+  background-color: var(--bg-hover) !important;
+}
+html:root .el-menu-item:not(.is-active):focus {
+  background-color: var(--bg-hover) !important;
+}
+
+/* 进度条默认档（无 status 属性时 EP 取 success 绿）。
+   进度是"进行中"的过程展示而非成败反馈——黑白单色系下统一主色。
+   显式 status="exception"/"warning" 的失败/警示反馈仍走状态色 */
+.el-progress-bar__inner {
+  background-color: var(--el-color-primary);
+}
+
+/* 进度条文字（percentage 显示）与主色一致 */
+.el-progress__text {
+  color: var(--text-secondary);
+}
+
+/* 暗色模式覆盖 —— 纯黑画布（canvas-night）下的 EP 映射。
+   fill 系全部映射到近黑分层；--el-color-white 已在 html:root 映射
+   text-inverse（暗色=墨色），primary 控件自动呈白底墨字。
+   html.dark (0,1,1) 特异性与亮色 html:root 同级且后者依赖 :root 前缀
+   无法覆盖暗色类——此处 html.dark 压过 EP 的 .dark (0,1,0) 与
+   html:root（类+元素 > 伪类+元素在源序靠后时），顺序解耦 */
+html.dark {
+  --el-color-primary: var(--color-primary);
+  /* 白主色与 black 的 mix 会产生灰阶，恰好充当暗色下的 primary 渐变档 */
+  --el-color-primary-light-3: color-mix(in srgb, var(--color-primary) 70%, black);
+  --el-color-primary-light-5: color-mix(in srgb, var(--color-primary) 50%, black);
+  --el-color-primary-light-7: color-mix(in srgb, var(--color-primary) 30%, black);
+  --el-color-primary-light-9: var(--color-primary-light);
+  --el-color-primary-dark-2: var(--color-primary-hover);
+
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-error);
+  --el-color-info: var(--color-info);
+  /* 状态浅档随暗色令牌自动重算（mix 目标 surface-card = #0a0a0a） */
+  --el-color-success-light-5: color-mix(in srgb, var(--color-success) 35%, var(--surface-card));
+  --el-color-success-light-8: var(--color-success-light);
+  --el-color-success-light-9: var(--color-success-light);
+  --el-color-warning-light-5: color-mix(in srgb, var(--color-warning) 35%, var(--surface-card));
+  --el-color-warning-light-8: var(--color-warning-light);
+  --el-color-warning-light-9: var(--color-warning-light);
+  --el-color-error-light-5: color-mix(in srgb, var(--color-error) 35%, var(--surface-card));
+  --el-color-error-light-8: var(--color-error-light);
+  --el-color-error-light-9: var(--color-error-light);
+  --el-color-danger-light-5: color-mix(in srgb, var(--color-error) 35%, var(--surface-card));
+  --el-color-danger-light-8: var(--color-error-light);
+  --el-color-danger-light-9: var(--color-error-light);
+  --el-color-info-light-5: color-mix(in srgb, var(--color-info) 35%, var(--surface-card));
+  --el-color-info-light-8: var(--color-primary-light);
+  --el-color-info-light-9: var(--color-primary-light);
+
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-secondary);
+  --el-text-color-secondary: var(--text-muted);
+  --el-text-color-placeholder: var(--text-muted);
+
+  --el-bg-color: var(--bg-secondary);
+  --el-bg-color-page: var(--bg-primary);
+  --el-bg-color-overlay: var(--surface-card);
+
+  --el-border-color: var(--border-default);
+  --el-border-color-light: var(--border-default);
+  --el-border-color-lighter: var(--bg-tertiary);
+  --el-border-color-hover: var(--border-hover);
+
+  --el-fill-color: var(--bg-tertiary);
+  --el-fill-color-blank: var(--surface-card);
+  --el-fill-color-light: var(--bg-tertiary);
+  --el-fill-color-lighter: var(--bg-secondary);
+  --el-fill-color-extra-light: var(--bg-secondary);
+  --el-fill-color-dark: var(--bg-hover);
+  --el-fill-color-darker: var(--bg-active);
+  --el-disabled-bg-color: var(--bg-secondary);
+  --el-disabled-text-color: var(--text-muted);
+  --el-disabled-border-color: var(--border-default);
+
+  /* Pagination 专用令牌（暗色：近黑分层底色 + 白主色高亮） */
+  --el-pagination-font-size: 13px;
+  --el-pagination-bg-color: var(--surface-card);
+  --el-pagination-text-color: var(--text-primary);
+  --el-pagination-button-color: var(--text-secondary);
+  --el-pagination-button-bg-color: var(--bg-tertiary);
+  --el-pagination-button-disabled-color: rgba(255, 255, 255, 0.25);
+  --el-pagination-button-disabled-bg-color: var(--bg-secondary);
+  --el-pagination-hover-color: var(--color-primary);
+  --el-pagination-border-radius: var(--radius-sm);
+
+  --el-box-shadow: var(--shadow-card);
+  --el-box-shadow-dark: var(--shadow-md);
+
+  /* Input 阴影减弱 */
+  --el-input-shadow: inset 0 0 0 1px var(--el-border-color);
+  --el-input-shadow-focus: inset 0 0 0 1px var(--el-color-primary);
+  --el-input-shadow-hover: inset 0 0 0 1px var(--el-border-color-hover);
+  --el-textarea-shadow: inset 0 0 0 1px var(--el-border-color);
+  --el-textarea-shadow-focus: inset 0 0 0 1px var(--el-color-primary);
+}
+
+/* ==================== Pagination 分页器暗色与单色系美化 ==================== */
+.el-pagination {
+  --el-pagination-font-size: 13px;
+  --el-pagination-button-width: 32px;
+  --el-pagination-button-height: 32px;
+}
+
+/* 分页按钮及翻页键通用美化 */
+.el-pagination.is-background .btn-prev,
+.el-pagination.is-background .btn-next,
+.el-pagination.is-background .el-pager li {
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-tertiary) !important;
+  color: var(--text-secondary) !important;
+  transition: background-color var(--transition-fast, 0.15s ease),
+              border-color var(--transition-fast, 0.15s ease),
+              color var(--transition-fast, 0.15s ease);
+  font-weight: 500;
+  box-sizing: border-box;
+}
+
+/* 悬停态：浅底微抬，文本提亮 */
+.el-pagination.is-background .btn-prev:not(:disabled):hover,
+.el-pagination.is-background .btn-next:not(:disabled):hover,
+.el-pagination.is-background .el-pager li:not(.is-active):not(.is-disabled):hover {
+  background-color: var(--bg-hover) !important;
+  border-color: var(--border-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* 激活态页码：黑白反转高对比徽章（亮色黑底白字，暗色白底黑字） */
+.el-pagination.is-background .el-pager li.is-active {
+  background-color: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  color: var(--text-inverse) !important;
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* 禁用态翻页键（上一页/下一页到头）：低透明度平滑融于背景，绝不泛白 */
+.el-pagination.is-background .btn-prev:disabled,
+.el-pagination.is-background .btn-prev.is-disabled,
+.el-pagination.is-background .btn-next:disabled,
+.el-pagination.is-background .btn-next.is-disabled,
+.el-pagination.is-background .el-pager li.is-disabled {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-muted) !important;
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* 省略号页码按钮 (...) */
+.el-pagination.is-background .el-pager li.more {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  color: var(--text-muted) !important;
+}
+.el-pagination.is-background .el-pager li.more:hover {
+  color: var(--text-primary) !important;
+}
+
+/* 跳页区（前往第 X 页） */
+.el-pagination__jump {
+  color: var(--text-secondary) !important;
+  font-size: 13px;
+}
+
+.el-pagination__editor.el-input .el-input__wrapper {
+  background-color: var(--bg-tertiary) !important;
+  border-radius: var(--radius-xs) !important;
+  box-shadow: inset 0 0 0 1px var(--border-default) !important;
+  transition: box-shadow var(--transition-fast, 0.15s ease);
+}
+
+.el-pagination__editor.el-input .el-input__wrapper:hover {
+  box-shadow: inset 0 0 0 1px var(--border-hover) !important;
+}
+
+.el-pagination__editor.el-input .el-input__wrapper.is-focus {
+  box-shadow: inset 0 0 0 1px var(--border-focus) !important;
+}
+
+.el-pagination__editor.el-input .el-input__inner {
+  color: var(--text-primary) !important;
+  font-weight: 500;
+}

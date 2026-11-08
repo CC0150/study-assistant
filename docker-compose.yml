@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  db:
+    # 自定义镜像：pgvector + zhparser（中文全文检索必需）
+    # 构建步骤见 deploy/postgres/Dockerfile；无法构建自定义镜像时可临时改回
+    # image: pgvector/pgvector:pg16，但中文 hybrid 检索将降级（启动日志 WARNING）
+    build:
+      context: ./deploy/postgres
+      dockerfile: Dockerfile
+      args:
+        # 国内/内网构建时设为镜像站（如 http://mirrors.cloud.aliyuncs.com/debian），
+        # 留空则用官方源，海外环境行为不变。取值写在各机器的 .env 里。
+        APT_MIRROR: ${APT_MIRROR:-}
+    image: study-copilot-db:latest
+    container_name: study-copilot-db
+    environment:
+      POSTGRES_DB: study_copilot
+      POSTGRES_USER: study_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U study_user -d study_copilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 合并镜像：nginx（前端静态文件 + API 反向代理）+ uvicorn（后端）
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-}
+        # 前端挂载子路径（如 /study/）；默认根路径
+        VITE_BASE: ${VITE_BASE:-/}
+    container_name: study-copilot-app
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://study_user:${POSTGRES_PASSWORD}@db:5432/study_copilot
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-3.5-turbo}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required (见 .env.example)}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required (见 .env.example)}
+    env_file:
+      - ./backend/.env
+    # 课堂引擎（OpenMAIC）若跑在宿主 3001：容器内用 host.docker.internal 访问。
+    # nginx 的 /classroom-engine/ 与 CLASSROOM_BASE_URL 都指向它。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # 宿主端口可配置：与同机上已有的 nginx（占 80/443）共存时，
+      # 在 .env 里设 APP_HOST_PORT=8080，由宿主 nginx 反代对外提供 HTTPS。
+      # 默认仍为 127.0.0.1:80，单机开发行为不变。
+      - "${APP_BIND:-127.0.0.1}:${APP_HOST_PORT:-80}:80"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/.embedding_cache:/app/.embedding_cache
+      # 向量模型缓存（镜像内 HF_HOME=/opt/hf）。不挂卷则每次重建容器都要重新
+      # 下载几百 MB 模型；国内服务器上这一步还极易超时，表现为"上传后永远处理中"。
+      - hf-cache:/opt/hf
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  hf-cache:

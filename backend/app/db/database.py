@@ -1,0 +1,581 @@
+"""SQLAlchemy 2.0 typed ORM models + async engine/session factory.
+
+2026-08-27: 全部模型从旧式 ``Column`` 声明迁移到 ``Mapped[]/mapped_column``
+类型化风格。纯类型层重构，DDL（列类型/可空性/索引/外键行为）逐字段保持不变；
+静态检查从此能直接使用真实字段类型（此前 service/api 层大量
+Column[str] vs str 误报由此根除）。
+
+2026-08-29: 连接池参数环境变量化，默认值与 SQLAlchemy 内置默认一致（向后兼容）。
+"""
+
+import os
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    TypeDecorator,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from app.config import settings
+
+engine = create_async_engine(
+    settings.database_url,
+    echo=settings.debug,
+    pool_size=int(os.environ.get("DB_POOL_SIZE", "5")),
+    max_overflow=int(os.environ.get("DB_MAX_OVERFLOW", "10")),
+    pool_timeout=int(os.environ.get("DB_POOL_TIMEOUT", "30")),
+    pool_recycle=int(os.environ.get("DB_POOL_RECYCLE", "3600")),
+)
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+class Base(DeclarativeBase):
+    """Declarative base (SQLAlchemy 2.0 风格，含类型注解映射)。"""
+
+
+def _utcnow_naive() -> datetime:
+    """统一的时间默认值：UTC 当前时刻（去 tzinfo，与既有 NOT NULL 列语义一致）。"""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+class _Vector(TypeDecorator):
+    """pgvector 兼容类型：PostgreSQL 渲染为 vector(N)，SQLite 回退为 JSON 存储。"""
+
+    impl = String
+    cache_ok = True
+
+    def __init__(self, dimension: int = 768):
+        super().__init__()
+        self.dimension = dimension
+
+    def get_col_spec(self, **kw: Any) -> str:
+        if kw.get("dialect") and kw["dialect"].name == "postgresql":
+            return f"vector({self.dimension})"
+        return "TEXT"
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        """Convert Python list to the DB representation."""
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            # asyncpg/pgvector expects a string like "[0.1,0.2,...]"
+            if isinstance(value, list):
+                return "[" + ",".join(str(v) for v in value) + "]"
+            return value
+        import json as _json
+
+        return _json.dumps(value)
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        """Convert DB value back to Python list."""
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return value
+        import json as _json
+
+        return _json.loads(value)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    course_space_id: Mapped[str | None] = mapped_column(
+        ForeignKey("course_spaces.id", ondelete="SET NULL"), index=True
+    )
+    filename: Mapped[str] = mapped_column(String)
+    file_path: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="pending")
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    file_size: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    vectorstore_path: Mapped[str | None] = mapped_column(String)
+    # 软删除标记：NULL=正常；非空=回收站（文件与索引保留，可恢复）
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+
+    # 阶段二：文档标签（复用 tags 池）
+    tags: Mapped[list["Tag"]] = relationship(secondary="document_tags", back_populates="documents")
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    title: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    # F17：最后活动时间（新消息写入时更新）+ 置顶
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+    is_pinned: Mapped[bool] = mapped_column(default=False)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)
+    sources: Mapped[str | None] = mapped_column(Text)
+    # 语义搜索索引：用户消息写入时计算 embedding，支持历史对话向量检索
+    embedding: Mapped[list[float] | None] = mapped_column(_Vector(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class Quiz(Base):
+    __tablename__ = "quizzes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    # 批次9修复：课堂来源测验（AI 互动课堂导入）无关联文档，原 NOT NULL 会让
+    # sync_quiz_results 的 INSERT 直接 IntegrityError（测试 SQLite 不强制
+    # FK 掩盖了该缺陷，生产 PostgreSQL 必炸）。analysis_service 已按
+    # `r.document_id or ""` 防御空值，放开可空不影响既有查询
+    document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id"), nullable=True)
+    question_type: Mapped[str] = mapped_column(String)
+    question: Mapped[str] = mapped_column(Text)
+    options: Mapped[str | None] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class QuizResult(Base):
+    __tablename__ = "quiz_results"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    quiz_id: Mapped[str] = mapped_column(ForeignKey("quizzes.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    user_answer: Mapped[str] = mapped_column(Text)
+    is_correct: Mapped[bool] = mapped_column(Boolean)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class UserLLMConfig(Base):
+    __tablename__ = "user_llm_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String, default="openrouter")
+    api_key: Mapped[str | None] = mapped_column(String)
+    base_url: Mapped[str | None] = mapped_column(String)
+    model_name: Mapped[str] = mapped_column(String, default="gpt-4o-mini")
+    temperature: Mapped[float] = mapped_column(Float, default=0.7)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
+    context_window: Mapped[int] = mapped_column(Integer, default=262144)
+    embedding_model: Mapped[str] = mapped_column(String, default="shibing624/text2vec-base-chinese")
+    embedding_dimension: Mapped[int] = mapped_column(Integer, default=768)
+    message_format: Mapped[str] = mapped_column(
+        String, default="openai"
+    )  # openai | anthropic | gemini | ollama
+    extra_config: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+
+
+# ── Note system & Course Space models ───────────────────────────────────
+
+note_tags = Table(
+    "note_tags",
+    Base.metadata,
+    # 关联表为非映射对象，沿用传统 Column 声明
+    Column("note_id", String, ForeignKey("notes.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", String, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+# 阶段二：文档标签（同一 tags 池）
+document_tags = Table(
+    "document_tags",
+    Base.metadata,
+    Column("document_id", String, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", String, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class CourseSpace(Base):
+    """A course space groups notes, documents, and chat sessions for a specific course."""
+
+    __tablename__ = "course_spaces"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str | None] = mapped_column(String, default="#6366f1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+
+    # relationships
+    notes: Mapped[list["Note"]] = relationship(
+        back_populates="course_space", cascade="all, delete-orphan"
+    )
+
+
+class Tag(Base):
+    """Reusable tag for categorizing notes and documents."""
+
+    __tablename__ = "tags"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+    # relationships
+    notes: Mapped[list["Note"]] = relationship(secondary=note_tags, back_populates="tags")
+    documents: Mapped[list["Document"]] = relationship(
+        secondary="document_tags", back_populates="tags"
+    )
+
+
+class Note(Base):
+    """A note belonging to a user, optionally linked to a course space and tagged."""
+
+    __tablename__ = "notes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    course_space_id: Mapped[str | None] = mapped_column(ForeignKey("course_spaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text, default="")
+    note_type: Mapped[str] = mapped_column(String, default="markdown")  # markdown / plain
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+    # 软删除标记：NULL=正常；非空=回收站（可恢复）
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    # pgvector 语义检索：标题+正文 的整篇 embedding（替代本地 FAISS 文件索引）
+    embedding: Mapped[list[float] | None] = mapped_column(_Vector(), nullable=True)
+
+    # relationships
+    course_space: Mapped["CourseSpace | None"] = relationship(back_populates="notes")
+    tags: Mapped[list["Tag"]] = relationship(secondary=note_tags, back_populates="notes")
+
+
+class AsyncTask(Base):
+    """Tracks long-running background tasks (document processing, quiz generation, etc.)."""
+
+    __tablename__ = "async_tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    task_type: Mapped[str] = mapped_column(String)  # e.g., "document_process", "quiz_generate"
+    status: Mapped[str] = mapped_column(
+        String, default="pending"
+    )  # pending / running / completed / failed / cancelled
+    progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0.0 ~ 1.0
+    result: Mapped[str | None] = mapped_column(Text)  # JSON-encoded result data
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 通知：NULL=未读；非空=已读（仅终态任务产生通知）
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+
+
+class DocumentChunk(Base):
+    """Text chunk with embedding for pgvector-based RAG retrieval.
+
+    Replaces file-based FAISS + BM25 indices.  Each row stores one chunk's
+    text, its dense embedding in the ``embedding`` vector column, and a JSON
+    ``metadata`` bag for auxiliary info (source, page, chunking_method, etc.).
+    """
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float] | None] = mapped_column(_Vector(), nullable=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    # Phase-2 coords / clean original / breadcrumb / parent flag (NULL-safe for legacy rows)
+    source_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_header: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_parent: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Phase-3 online edit: optimistic concurrency + reindex status
+    content_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    index_status: Mapped[str] = mapped_column(String(20), default="ready", server_default="ready")
+    last_editor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ChunkRevision(Base):
+    """Immutable snapshot of a replaced chunk version (history for revert).
+
+    Current version stays on ``document_chunks``; this table only holds
+    superseded bodies. UNIQUE(chunk_id, revision) prevents double-snapshot.
+    """
+
+    __tablename__ = "chunk_revisions"
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "revision", name="uq_chunk_revisions_chunk_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("document_chunks.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    editor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    edited_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CustomPersona(Base):
+    """User-defined custom discussion persona, persisted in DB and scoped per user."""
+
+    __tablename__ = "custom_personas"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(50))
+    role: Mapped[str] = mapped_column(String(50), index=True)
+    avatar: Mapped[str] = mapped_column(String(50), default="User")
+    color: Mapped[str | None] = mapped_column(String(20), default="#6366f1")
+    system_message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+
+
+class MemoryItem(Base):
+    """Long-term memory item for cross-session knowledge retention.
+
+    Categorized into 5 kinds (WeKnora design):
+    - profile: stable identity traits (grade, major, background) -> resident block
+    - preference: behavioral tendencies (brief answers, python focus) -> resident block
+    - fact: situational domain knowledge (exam date, courses) -> situational recall
+    - task: ongoing projects or learning goals -> situational recall
+    - interest: recurring topics of interest -> conditions retrieval
+    """
+
+    __tablename__ = "memory_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(
+        String(30), index=True
+    )  # profile/preference/fact/task/interest
+    origin: Mapped[str] = mapped_column(String(30), default="explicit")  # explicit/extracted/manual
+    status: Mapped[str] = mapped_column(
+        String(30), default="active", index=True
+    )  # active/superseded/archived/pending
+    key: Mapped[str] = mapped_column(String(100), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow_naive, onupdate=_utcnow_naive
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MemorySubject(Base):
+    """User-level memory settings and resident block cache."""
+
+    __tablename__ = "memory_subjects"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    block_text: Mapped[str] = mapped_column(Text, default="")
+    capacity: Mapped[int] = mapped_column(Integer, default=200)
+    last_extracted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow_naive, onupdate=_utcnow_naive
+    )
+
+
+class TokenUsage(Base):
+    """Tracks token consumption across AI Chat, Classroom Generation, and other tasks."""
+
+    __tablename__ = "token_usages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+    # 业务来源: chat, classroom, agent, quiz, transform, note
+    source: Mapped[str] = mapped_column(String(50), default="chat", index=True)
+    # 模态: llm, image, tts, asr
+    kind: Mapped[str] = mapped_column(String(20), default="llm", index=True)
+    provider: Mapped[str] = mapped_column(String(50), default="openai")
+    model_name: Mapped[str] = mapped_column(String(100), default="unknown", index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    unit: Mapped[str] = mapped_column(String(20), default="token")  # token, image, character, second
+    extra_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+
+    user: Mapped["User"] = relationship()
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "source": self.source,
+            "kind": self.kind,
+            "provider": self.provider,
+            "model_name": self.model_name,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "quantity": self.quantity,
+            "unit": self.unit,
+            "extra_meta": self.extra_meta or {},
+        }
+
+
+class UserFavorite(Base):
+    """P0-B：文档 / 笔记 / 消息收藏（书签）。type 白名单见 service。"""
+
+    __tablename__ = "user_favorites"
+    __table_args__ = (
+        UniqueConstraint("user_id", "resource_type", "resource_id", name="uq_user_favorites"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    resource_type: Mapped[str] = mapped_column(String(20))  # document | note | message
+    resource_id: Mapped[str] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class DocumentParseSpan(Base):
+    """阶段三：文档解析阶段时间线（root/stage/subspan）。
+
+    status 语义对齐 WeKnora knowledge_span：
+    failed=本阶段出错；cancelled=上游失败后本阶段未执行。
+    """
+
+    __tablename__ = "document_parse_spans"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    parent_span_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), default="stage")  # root|stage|subspan
+    name: Mapped[str] = mapped_column(String(50))  # parse|profile|chunk|embed|index|finalize
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # pending|running|done|failed|skipped|cancelled
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WikiPage(Base):
+    """阶段五 5.1：知识 Wiki 概念页（单用户）。
+
+    slug 全局（用户内）唯一，用于 [[slug]] 双向链接。
+    """
+
+    __tablename__ = "wiki_pages"
+    __table_args__ = (
+        UniqueConstraint("user_id", "slug", name="uq_wiki_pages_user_slug"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    slug: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    page_type: Mapped[str] = mapped_column(String(32), default="concept")  # concept|entity|summary|index
+    status: Mapped[str] = mapped_column(String(20), default="published")  # draft|published|archived
+    content: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow_naive, onupdate=_utcnow_naive
+    )
+
+
+class WikiPageRevision(Base):
+    """Wiki 概念页被取代版本快照（5.4 回滚用）。"""
+
+    __tablename__ = "wiki_page_revisions"
+    __table_args__ = (
+        UniqueConstraint("page_id", "revision", name="uq_wiki_page_revisions"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    page_id: Mapped[str] = mapped_column(
+        ForeignKey("wiki_pages.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def init_db() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def ensure_current_schema() -> None:
+    """Create any missing tables from ORM models (idempotent)."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

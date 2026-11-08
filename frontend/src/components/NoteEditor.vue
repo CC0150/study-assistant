@@ -1,0 +1,330 @@
+<template>
+  <div ref="editorContainer" class="note-editor">
+    <!-- Toolbar -->
+    <div class="flex items-center justify-between px-4 py-2 border-b border-[var(--border-default)] bg-[var(--bg-secondary)] rounded-t-xl">
+      <!-- F2：编辑类工具在预览态禁用（textarea 未挂载，避免静默失败） -->
+      <div class="flex items-center gap-1">
+        <el-button circle size="small" :disabled="showPreview" @click="insertMarkdown('**', '**')" title="粗体">
+          <span class="text-xs font-bold">B</span>
+        </el-button>
+        <el-button circle size="small" :disabled="showPreview" @click="insertMarkdown('*', '*')" title="斜体">
+          <span class="text-xs italic">I</span>
+        </el-button>
+        <el-button circle size="small" :disabled="showPreview" @click="insertLinePrefix('## ')" title="标题">
+          <span class="text-xs font-bold">H</span>
+        </el-button>
+        <el-button circle size="small" :disabled="showPreview" @click="insertLinePrefix('- ')" title="列表">
+          <el-icon class="w-4 h-4"><List /></el-icon>
+        </el-button>
+        <el-button circle size="small" :disabled="showPreview" @click="insertMarkdown('`', '`')" title="代码">
+          <span class="text-xs font-mono">&lt;/&gt;</span>
+        </el-button>
+        <el-button circle size="small" :disabled="showPreview" @click="insertLinePrefix('> ')" title="引用">
+          <span class="text-xs font-serif font-bold">&quot;</span>
+        </el-button>
+        <div class="w-px h-5 bg-[var(--bg-active)] mx-1"></div>
+        <el-button circle size="small" @click="togglePreview" :type="showPreview ? 'primary' : 'default'" title="预览">
+          <el-icon class="w-4 h-4"><View /></el-icon>
+        </el-button>
+        <el-button circle size="small" @click="openTransform" title="AI 内容转换">
+          <el-icon class="w-4 h-4"><Switch /></el-icon>
+        </el-button>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-[var(--text-muted)]">{{ charCount }} 字</span>
+      </div>
+    </div>
+
+    <!-- Title Input -->
+    <el-input
+      v-model="localTitle"
+      type="text"
+      placeholder="笔记标题..."
+      class="title-input"
+      @input="onTitleChange"
+    />
+
+    <!-- Tags Input -->
+    <div class="px-4 py-2 border-b border-[var(--border-default)] flex items-center gap-2 flex-wrap">
+      <span
+        v-for="tag in localTags"
+        :key="tag"
+        class="text-xs px-2 py-0.5 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded-full flex items-center gap-1"
+      >
+        {{ tag }}
+        <button @click="removeTag(tag)" class="text-[var(--text-muted)] hover:text-[var(--text-secondary)]">
+          <el-icon class="w-4 h-4"><Close /></el-icon>
+        </button>
+      </span>
+      <input
+        v-model="newTag"
+        type="text"
+        placeholder="添加标签..."
+        class="text-xs border-none outline-none bg-transparent w-20 placeholder-[var(--text-muted)]"
+        @keydown.enter.prevent="addTag"
+      />
+    </div>
+
+    <!-- Editor / Preview Area -->
+    <div v-if="showPreview" class="preview-area" v-html="renderedContent"></div>
+    <el-input
+      v-else
+      ref="textareaEl"
+      v-model="localContent"
+      type="textarea"
+      placeholder="开始记录笔记...支持 Markdown 语法"
+      class="editor-textarea"
+      :autosize="{ minRows: 10, maxRows: 20 }"
+      @input="onContentChange"
+      @keydown.tab.prevent="handleTab"
+    />
+
+    <!-- Transform Dialog -->
+    <TransformDialog
+      v-model:visible="showTransformDialog"
+      :source-text="localContent"
+      :source-title="localTitle"
+      :note-id="noteId"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, nextTick } from 'vue'
+import { List, View, Switch, Close } from '@/components/icons'
+import { useMarkdown } from '../composables/useMarkdown'
+import TransformDialog from './TransformDialog.vue'
+
+const props = withDefaults(defineProps<{
+  title?: string
+  content?: string
+  tags?: string[]
+  noteId?: string
+}>(), {
+  title: '',
+  content: '',
+  tags: () => [],
+  noteId: undefined
+})
+
+const emit = defineEmits<{
+  'update:title': [value: string]
+  'update:content': [value: string]
+  'update:tags': [value: string[]]
+  save: []
+}>()
+
+const showPreview = ref(false)
+const newTag = ref('')
+const localTitle = ref(props.title)
+const localContent = ref(props.content)
+const localTags = ref<string[]>([...props.tags])
+
+// el-input textarea 的组件实例（.textarea 是原生元素引用）
+const textareaEl = ref<{ textarea?: HTMLTextAreaElement } | null>(null)
+
+// Transform dialog
+const showTransformDialog = ref(false)
+
+const { renderMarkdown } = useMarkdown()
+
+const charCount = computed(() => localContent.value.length)
+
+const renderedContent = computed(() => renderMarkdown(localContent.value))
+
+watch(() => props.title, (val) => { localTitle.value = val })
+watch(() => props.content, (val) => { localContent.value = val })
+watch(() => props.tags, (val) => { localTags.value = [...val] })
+
+function onTitleChange(): void {
+  emit('update:title', localTitle.value)
+  emit('save')
+}
+
+function onContentChange(): void {
+  emit('update:content', localContent.value)
+  emit('save')
+}
+
+function addTag(): void {
+  const tag = newTag.value.trim()
+  if (tag && !localTags.value.includes(tag)) {
+    localTags.value.push(tag)
+    emit('update:tags', [...localTags.value])
+    emit('save')
+  }
+  newTag.value = ''
+}
+
+function removeTag(tag: string): void {
+  localTags.value = localTags.value.filter(t => t !== tag)
+  emit('update:tags', [...localTags.value])
+  emit('save')
+}
+
+function togglePreview(): void {
+  showPreview.value = !showPreview.value
+}
+
+function insertMarkdown(before: string, after: string): void {
+  const textarea = textareaEl.value?.textarea
+  if (!textarea) return
+
+  const start = textarea.selectionStart
+  const end = textarea.selectionEnd
+  const selected = localContent.value.substring(start, end) || '文本'
+
+  const replacement = before + selected + after
+  localContent.value =
+    localContent.value.substring(0, start) +
+    replacement +
+    localContent.value.substring(end)
+
+  nextTick(() => {
+    textarea.focus()
+    textarea.setSelectionRange(start + before.length, start + before.length + selected.length)
+  })
+
+  emit('update:content', localContent.value)
+  // F1：工具栏修改也触发 save（否则不进草稿，关页即丢）
+  emit('save')
+}
+
+function insertLinePrefix(prefix: string): void {
+  const textarea = textareaEl.value?.textarea
+  if (!textarea) return
+
+  const start = textarea.selectionStart
+  const lineStart = localContent.value.lastIndexOf('\n', start - 1) + 1
+
+  localContent.value =
+    localContent.value.substring(0, lineStart) +
+    prefix +
+    localContent.value.substring(lineStart)
+
+  nextTick(() => {
+    textarea.focus()
+    textarea.setSelectionRange(start + prefix.length, start + prefix.length)
+  })
+
+  emit('update:content', localContent.value)
+  // F1：同上，工具栏触发的修改需入草稿
+  emit('save')
+}
+
+function handleTab(_e: Event): void {
+  const textarea = textareaEl.value?.textarea
+  if (!textarea) return
+
+  const start = textarea.selectionStart
+  const end = textarea.selectionEnd
+
+  localContent.value =
+    localContent.value.substring(0, start) +
+    '  ' +
+    localContent.value.substring(end)
+
+  nextTick(() => {
+    textarea.focus()
+    textarea.setSelectionRange(start + 2, start + 2)
+  })
+
+  emit('update:content', localContent.value)
+  // F1：Tab 缩进也是内容修改
+  emit('save')
+}
+
+function openTransform(): void {
+  showTransformDialog.value = true
+}
+</script>
+
+<style scoped>
+.note-editor {
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-default);
+  /* F5：8px 硬编码 → 令牌（P2-1 圆角统一收尾） */
+  border-radius: var(--radius-lg);
+}
+
+.title-input :deep(.el-input__wrapper) {
+  border-radius: 0;
+  border-bottom: 1px solid var(--border-default);
+  padding: 12px 16px;
+  box-shadow: none;
+}
+
+.title-input :deep(.el-input__inner) {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.title-input :deep(.el-input__inner::placeholder) {
+  color: var(--text-muted);
+}
+
+.editor-textarea :deep(.el-textarea__inner) {
+  border: none;
+  border-radius: 0;
+  padding: 16px;
+  min-height: 300px;
+  max-height: 60dvh;
+  color: var(--text-primary);
+  line-height: 1.6;
+  resize: none;
+  font-family: monospace;
+  font-size: 0.875rem;
+}
+
+.editor-textarea :deep(.el-textarea__inner::placeholder) {
+  color: var(--text-muted);
+}
+
+.preview-area {
+  padding: 16px;
+  min-height: 300px;
+  max-height: 60dvh;
+  overflow-y: auto;
+}
+
+.preview-area :deep(h1) {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 1rem 0 0.5rem;
+}
+
+.preview-area :deep(h2) {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0.75rem 0 0.5rem;
+}
+
+.preview-area :deep(h3) {
+  font-size: 1.125rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0.5rem 0 0.25rem;
+}
+
+.preview-area :deep(li) {
+  list-style: disc;
+  margin-left: 1rem;
+}
+
+.preview-area :deep(.inline-code) {
+  background-color: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+.preview-area :deep(blockquote) {
+  padding-left: 1rem;
+  border-left: 4px solid var(--border-default);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+</style>

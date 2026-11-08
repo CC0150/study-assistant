@@ -1,0 +1,564 @@
+<template>
+  <div class="auth-page min-h-screen relative overflow-hidden flex items-center justify-center p-6">
+    <!-- ── 全屏品牌背景层 ── -->
+    <div class="bg-base"></div>
+    <div class="bg-grid"></div>
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+    <div class="bg-ring bg-ring-1"></div>
+    <div class="bg-ring bg-ring-2"></div>
+    <div
+      v-for="(p, i) in particles"
+      :key="i"
+      class="bg-particle"
+      :style="{
+        left: p.left + '%',
+        width: p.size + 'px',
+        height: p.size + 'px',
+        animationDelay: p.delay + 's',
+        animationDuration: p.duration + 's'
+      }"
+    ></div>
+
+    <!-- ── 中央悬浮卡片 ── -->
+    <div class="relative z-10 w-full max-w-md">
+      <!-- 品牌标识 -->
+      <div class="text-center mb-8">
+        <CopilotBotAvatar ref="botLogo" :size="80" mood="idle" class="mx-auto mb-5 block" />
+        <h1 class="auth-title text-2xl font-semibold tracking-tight">注册 Study Copilot</h1>
+        <p class="auth-subtitle mt-2 text-sm">创建账户，开启智能学习之旅</p>
+      </div>
+
+      <!-- 注册卡片 -->
+      <form @submit.prevent="handleRegister">
+        <div class="card-shell rounded-2xl">
+          <el-card ref="registerCard" :body-style="{ padding: '32px' }" shadow="never">
+            <div class="space-y-4">
+              <div>
+                <label for="register-username" class="block text-sm text-[var(--text-secondary)] mb-1">用户名</label>
+                <el-input
+                  id="register-username"
+                  v-model="form.username"
+                  placeholder="请输入用户名"
+                  required
+                />
+              </div>
+
+              <div>
+                <label for="register-email" class="block text-sm text-[var(--text-secondary)] mb-1">邮箱</label>
+                <el-input
+                  id="register-email"
+                  v-model="form.email"
+                  type="email"
+                  placeholder="请输入邮箱"
+                  required
+                />
+              </div>
+
+              <div>
+                <label for="register-password" class="block text-sm text-[var(--text-secondary)] mb-1">密码</label>
+                <el-input
+                  id="register-password"
+                  v-model="form.password"
+                  type="password"
+                  show-password
+                  placeholder="至少 8 位，含字母和数字"
+                  minlength="8"
+                  maxlength="128"
+                  required
+                />
+                <!-- 密码强度指示 -->
+                <div v-if="form.password" class="mt-2 space-y-1">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="text-[var(--text-muted)]">密码强度</span>
+                    <span :class="passwordStrength.colorClass" class="font-medium">
+                      {{ passwordStrength.text }}
+                    </span>
+                  </div>
+                  <div class="h-1.5 w-full bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+                    <div
+                      class="h-full rounded-full transition-all duration-300"
+                      :class="passwordStrength.barClass"
+                      :style="{ width: `${passwordStrength.score}%` }"
+                    />
+                  </div>
+                  <ul v-if="passwordStrength.tips.length" class="text-xs text-[var(--text-muted)] space-y-0.5">
+                    <li v-for="tip in passwordStrength.tips" :key="tip">· {{ tip }}</li>
+                  </ul>
+                </div>
+                <p v-else class="mt-1 text-xs text-[var(--text-muted)]">
+                  至少 8 位，需同时包含字母和数字；建议混用大小写与符号
+                </p>
+              </div>
+
+              <div>
+                <label for="register-password2" class="block text-sm text-[var(--text-secondary)] mb-1">确认密码</label>
+                <el-input
+                  id="register-password2"
+                  v-model="form.confirmPassword"
+                  type="password"
+                  show-password
+                  placeholder="请再次输入密码"
+                  maxlength="128"
+                  required
+                />
+                <p
+                  v-if="form.confirmPassword && form.confirmPassword !== form.password"
+                  class="mt-1 text-xs text-[var(--color-error)]"
+                >
+                  两次输入的密码不一致
+                </p>
+              </div>
+
+              <!-- Turnstile（服务端配置了 site key 才渲染） -->
+              <div v-if="turnstileSiteKey" class="turnstile-box">
+                <div ref="turnstileEl" class="cf-turnstile" :data-sitekey="turnstileSiteKey"></div>
+              </div>
+
+              <!-- 本地算术验证码（Turnstile 未配置时） -->
+              <div v-else-if="captchaMode === 'math'">
+                <label for="register-captcha" class="block text-sm text-[var(--text-secondary)] mb-1">
+                  人机验证
+                </label>
+                <div class="flex items-center gap-2">
+                  <div
+                    class="captcha-q flex-shrink-0 h-10 px-3 rounded-lg border border-[var(--border-default)] bg-[var(--bg-tertiary)] flex items-center text-sm font-mono tracking-wide"
+                  >
+                    {{ captcha.question || '…' }}
+                  </div>
+                  <el-button text type="primary" @click="refreshCaptcha" :disabled="loading">
+                    换一题
+                  </el-button>
+                  <el-input
+                    id="register-captcha"
+                    v-model="form.captchaAnswer"
+                    placeholder="答案"
+                    class="flex-1"
+                    inputmode="numeric"
+                    required
+                  />
+                </div>
+              </div>
+
+              <el-button
+                type="primary"
+                class="login-btn w-full !h-11 text-[15px] font-medium"
+                :disabled="loading || !canSubmit"
+                native-type="submit"
+              >
+                {{ loading ? '注册中...' : '注册' }}
+              </el-button>
+
+              <p v-if="error" class="text-sm text-[var(--color-error)] text-center">{{ error }}</p>
+            </div>
+          </el-card>
+        </div>
+      </form>
+
+      <p class="auth-footer text-center mt-6 text-sm">
+        已有账户?
+        <router-link to="/login" class="auth-link font-medium hover:underline">
+          立即登录
+        </router-link>
+      </p>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
+import CopilotBotAvatar from '@/components/CopilotBotAvatar.vue'
+import gsap from 'gsap'
+import { useAuthStore } from '../stores/auth'
+import { useRouter } from 'vue-router'
+import type { AxiosError } from 'axios'
+import { useReducedMotion } from '../composables/useReducedMotion'
+import { validatePassword, passwordStrength as scorePassword } from '../utils/passwordPolicy'
+import api from '../services/api'
+
+const authStore = useAuthStore()
+const router = useRouter()
+const { prefersReduced } = useReducedMotion()
+
+const registerCard = ref<HTMLElement | null>(null)
+const botLogo = ref<InstanceType<typeof CopilotBotAvatar> | null>(null)
+const turnstileEl = ref<HTMLElement | null>(null)
+let ctx: gsap.Context | null = null
+
+const form = ref({
+  username: '',
+  email: '',
+  password: '',
+  confirmPassword: '',
+  captchaAnswer: ''
+})
+const loading = ref(false)
+const error = ref('')
+const turnstileSiteKey = ref('')
+const turnstileToken = ref('')
+const registerAllowed = ref(true)
+const captchaMode = ref<'turnstile' | 'math' | 'none'>('math')
+const captcha = ref<{ id: string; question: string }>({ id: '', question: '' })
+
+const passwordStrength = computed(() => scorePassword(form.value.password))
+const passwordIssue = computed(() =>
+  form.value.password ? validatePassword(form.value.password) : null
+)
+const canSubmit = computed(() => {
+  if (!registerAllowed.value) return false
+  if (!form.value.username || !form.value.email || !form.value.password) return false
+  if (form.value.confirmPassword !== form.value.password) return false
+  if (passwordIssue.value) return false
+  if (captchaMode.value === 'math' && !form.value.captchaAnswer.trim()) return false
+  if (captchaMode.value === 'turnstile' && turnstileSiteKey.value && !turnstileToken.value) {
+    // 允许在 widget 尚未完成时禁用按钮
+    return false
+  }
+  return true
+})
+
+function readTurnstileToken(): void {
+  // 官方 widget 渲染后会把 token 写进隐藏 input
+  const input = document.querySelector<HTMLInputElement>('input[name="cf-turnstile-response"]')
+  turnstileToken.value = input?.value || ''
+}
+
+async function loadTurnstile(siteKey: string): Promise<void> {
+  if (!siteKey || document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) {
+    readTurnstileToken()
+    return
+  }
+  await new Promise<void>((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    s.async = true
+    s.onload = () => resolve()
+    s.onerror = () => reject(new Error('turnstile load failed'))
+    document.head.appendChild(s)
+  })
+  await nextTick()
+  const w = window as unknown as {
+    turnstile?: {
+      render: (el: HTMLElement, opts: Record<string, unknown>) => void
+    }
+  }
+  if (w.turnstile && turnstileEl.value) {
+    w.turnstile.render(turnstileEl.value, {
+      sitekey: siteKey,
+      callback: (token: string) => {
+        turnstileToken.value = token
+      }
+    })
+  }
+}
+
+const particles = [
+  { left: 10, size: 3, delay: 0, duration: 18 },
+  { left: 22, size: 2, delay: 3, duration: 22 },
+  { left: 35, size: 4, delay: 7, duration: 16 },
+  { left: 48, size: 2, delay: 1, duration: 24 },
+  { left: 62, size: 3, delay: 5, duration: 19 },
+  { left: 75, size: 2, delay: 9, duration: 21 },
+  { left: 88, size: 3, delay: 2, duration: 17 }
+]
+
+async function refreshCaptcha(): Promise<void> {
+  try {
+    const resp = await api.get<{ id: string; question: string }>('/auth/captcha')
+    captcha.value = { id: resp.data.id, question: resp.data.question }
+    form.value.captchaAnswer = ''
+  } catch {
+    captcha.value = { id: '', question: '加载失败，请点击「换一题」' }
+  }
+}
+
+async function handleRegister(): Promise<void> {
+  loading.value = true
+  error.value = ''
+
+  if (!registerAllowed.value) {
+    error.value = '当前未开放注册'
+    loading.value = false
+    return
+  }
+  if (form.value.confirmPassword !== form.value.password) {
+    error.value = '两次输入的密码不一致'
+    loading.value = false
+    return
+  }
+  const pwdErr = validatePassword(form.value.password)
+  if (pwdErr) {
+    error.value = pwdErr
+    loading.value = false
+    return
+  }
+  if (turnstileSiteKey.value) {
+    readTurnstileToken()
+    if (!turnstileToken.value) {
+      error.value = '请完成人机验证后再注册'
+      loading.value = false
+      return
+    }
+  } else if (captchaMode.value === 'math') {
+    if (!captcha.value.id || !form.value.captchaAnswer.trim()) {
+      error.value = '请完成算术人机验证'
+      loading.value = false
+      return
+    }
+  }
+
+  try {
+    await authStore.register({
+      username: form.value.username,
+      email: form.value.email,
+      password: form.value.password,
+      confirmPassword: form.value.confirmPassword,
+      turnstileToken: turnstileToken.value || undefined,
+      captchaId: !turnstileSiteKey.value && captchaMode.value === 'math' ? captcha.value.id : undefined,
+      captchaAnswer:
+        !turnstileSiteKey.value && captchaMode.value === 'math' ? form.value.captchaAnswer : undefined
+    })
+    router.push('/login')
+  } catch (e) {
+    const axiosError = e as AxiosError<{ detail: string }>
+    error.value = axiosError.response?.data?.detail || '注册失败，请稍后重试'
+    if (!turnstileSiteKey.value && captchaMode.value === 'math') {
+      void refreshCaptcha()
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(async () => {
+  try {
+    const resp = await api.get<{
+      allow_registration?: boolean
+      turnstile_site_key?: string
+      captcha_mode?: 'turnstile' | 'math' | 'none'
+    }>('/auth/register-meta')
+    registerAllowed.value = resp.data.allow_registration !== false
+    turnstileSiteKey.value = resp.data.turnstile_site_key || ''
+    if (resp.data.captcha_mode) {
+      captchaMode.value = resp.data.captcha_mode
+    } else if (turnstileSiteKey.value) {
+      captchaMode.value = 'turnstile'
+    } else {
+      captchaMode.value = 'math'
+    }
+
+    if (turnstileSiteKey.value) {
+      try {
+        await loadTurnstile(turnstileSiteKey.value)
+      } catch {
+        // 加载失败时仍允许提交，由服务端拒绝
+      }
+    } else if (captchaMode.value === 'math') {
+      await refreshCaptcha()
+    }
+  } catch {
+    captchaMode.value = 'math'
+    await refreshCaptcha()
+  }
+
+  if (prefersReduced.value) return
+  ctx = gsap.context(() => {
+    if (registerCard.value) {
+      gsap.from(registerCard.value, {
+        y: 34,
+        opacity: 0,
+        duration: 0.65,
+        ease: 'power2.out'
+      })
+    }
+    nextTick(() => botLogo.value?.play?.('acknowledge'))
+  })
+})
+
+onUnmounted(() => {
+  ctx?.revert()
+})
+</script>
+
+<style scoped>
+/* ── 全屏品牌背景层：跟随主题令牌 ── */
+.bg-base {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-primary);
+}
+.bg-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0, 0, 0, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.055) 1px, transparent 1px);
+  background-size: 38px 38px;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 42%, black, transparent 72%);
+  mask-image: radial-gradient(ellipse at 50% 42%, black, transparent 72%);
+}
+html.dark .bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+}
+.bg-glow {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(80px);
+  opacity: 0.4;
+  will-change: transform;
+}
+.bg-glow-1 {
+  width: 440px;
+  height: 440px;
+  background: #c9c9d4;
+  top: -120px;
+  left: -100px;
+  animation: glow-drift-1 26s ease-in-out infinite;
+}
+.bg-glow-2 {
+  width: 400px;
+  height: 400px;
+  background: #d4d4de;
+  bottom: -140px;
+  right: -80px;
+  animation: glow-drift-2 32s ease-in-out infinite;
+}
+html.dark .bg-glow-1 {
+  background: #3f3f44;
+}
+html.dark .bg-glow-2 {
+  background: #5a5a5f;
+}
+.bg-ring {
+  position: absolute;
+  border-radius: 9999px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+html.dark .bg-ring {
+  border-color: rgba(255, 255, 255, 0.09);
+}
+.bg-ring-1 {
+  width: 520px;
+  height: 520px;
+  top: 50%;
+  left: 50%;
+  animation: ring-spin 120s linear infinite;
+}
+.bg-ring-2 {
+  width: 680px;
+  height: 680px;
+  top: 50%;
+  left: 50%;
+  animation: ring-spin-rev 160s linear infinite;
+}
+
+/* ── 背景粒子 ── */
+.bg-particle {
+  position: absolute;
+  bottom: -12px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  animation: rise linear infinite;
+  will-change: transform, opacity;
+}
+html.dark .bg-particle {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.auth-title {
+  color: var(--text-primary);
+}
+.auth-subtitle {
+  color: var(--text-muted);
+}
+.auth-footer {
+  color: var(--text-secondary);
+}
+.auth-link {
+  color: var(--text-primary);
+}
+
+/* ── 悬浮卡片外壳 ── */
+.card-shell {
+  position: relative;
+  padding: 1px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.05));
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(15, 15, 25, 0.12), 0 4px 14px rgba(15, 15, 25, 0.06);
+}
+html.dark .card-shell {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.1));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.card-shell :deep(.el-card) {
+  border-radius: 17px;
+  border: none;
+}
+
+/* ── 注册按钮 ── */
+.login-btn {
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+.turnstile-box {
+  display: flex;
+  justify-content: center;
+  min-height: 65px;
+}
+.captcha-q {
+  min-width: 108px;
+  justify-content: center;
+  color: var(--text-primary);
+  user-select: none;
+}
+.login-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+}
+html.dark .login-btn:hover {
+  box-shadow: 0 6px 16px rgba(255, 255, 255, 0.25);
+}
+.login-btn:active {
+  transform: translateY(0);
+}
+
+/* ── 动画 Keyframes ── */
+@keyframes glow-drift-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-56px, 42px) scale(1.12); }
+}
+@keyframes glow-drift-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(48px, -52px) scale(1.14); }
+}
+@keyframes ring-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+@keyframes ring-spin-rev {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(-360deg); }
+}
+@keyframes rise {
+  0% { transform: translateY(0); opacity: 0; }
+  12% { opacity: 0.55; }
+  82% { opacity: 0.35; }
+  100% { transform: translateY(-105vh); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-glow-1,
+  .bg-glow-2,
+  .bg-ring-1,
+  .bg-ring-2,
+  .bg-particle {
+    animation: none;
+  }
+  .bg-particle {
+    opacity: 0;
+  }
+}
+</style>

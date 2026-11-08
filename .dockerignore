@@ -1,0 +1,41 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.coverage
+htmlcov/
+*.egg-info
+dist/
+build/
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# Data
+backend/.embedding_cache/
+backend/uploads/
+backend/vectorstore/
+backend/tests/
+
+# Version control
+.git
+.gitignore
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Databases
+*.db
+*.sqlite
+

@@ -1,0 +1,3 @@
+# Compatibility shim: use `uv pip install -e .[dev]` instead.
+# This file is kept for legacy tooling that does not support pyproject.toml.
+-e .

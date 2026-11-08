@@ -1,0 +1,347 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// Mock the api module before importing the store
+vi.mock('@/services/api', () => ({
+  default: {
+    get: vi.fn(),
+    post: vi.fn(),
+    put: vi.fn(),
+    delete: vi.fn(),
+  },
+  cancelAll: vi.fn(),
+}))
+
+import { setActivePinia, createPinia } from 'pinia'
+import { useChatStore } from '@/stores/chat'
+import api from '@/services/api'
+
+describe('Chat Store', () => {
+  let store
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useChatStore()
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('has correct initial state', () => {
+    expect(store.messages).toEqual([])
+    expect(store.sessions).toEqual([])
+    expect(store.currentSession).toBeNull()
+    expect(store.loading).toBe(false)
+    expect(store.isStreaming).toBe(false)
+  })
+
+  it('fetchSessions loads sessions from API', async () => {
+    const mockSessions = [
+      { session_id: 'sess-1', title: 'Session 1' },
+      { session_id: 'sess-2', title: 'Session 2' },
+    ]
+    api.get.mockResolvedValue({ data: mockSessions })
+
+    await store.fetchSessions()
+
+    expect(api.get).toHaveBeenCalledWith('/chat/history')
+    expect(store.sessions).toEqual(mockSessions)
+  })
+
+  it('askQuestion adds user and assistant messages', async () => {
+    const mockResponse = {
+      data: {
+        session_id: 'new-session',
+        answer: 'This is the answer',
+        sources: [{ document_id: 'doc1', text: 'source text', relevance_score: 0.9 }],
+        used_source_indices: [0],
+        filtered_sources: [],
+      },
+    }
+    api.post.mockResolvedValue(mockResponse)
+
+    const result = await store.askQuestion('What is AI?', ['doc1'])
+
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[0].role).toBe('user')
+    expect(store.messages[0].content).toBe('What is AI?')
+    expect(store.messages[1].role).toBe('assistant')
+    expect(store.messages[1].content).toBe('This is the answer')
+    expect(store.messages[1].sources).toHaveLength(1)
+    expect(store.currentSession).toBe('new-session')
+    expect(result).toEqual(mockResponse.data)
+  })
+
+  it('clearMessages resets messages array', () => {
+    store.messages.value = [
+      { id: 1, role: 'user', content: 'hello' },
+      { id: 2, role: 'assistant', content: 'hi' },
+    ]
+
+    store.clearMessages()
+
+    expect(store.messages).toEqual([])
+  })
+
+  it('deleteSession removes session from list', async () => {
+    store.sessions = [
+      { session_id: 'sess-1', title: 'Session 1' },
+      { session_id: 'sess-2', title: 'Session 2' },
+    ]
+    api.delete.mockResolvedValue({})
+
+    await store.deleteSession('sess-1')
+
+    expect(api.delete).toHaveBeenCalledWith('/chat/history/sess-1')
+    expect(store.sessions).toHaveLength(1)
+    expect(store.sessions[0].session_id).toBe('sess-2')
+  })
+
+  it('fetchHistory loads and normalizes discussion messages', async () => {
+    const mockHistory = {
+      messages: [
+        { id: '1', role: 'user', content: 'Discuss AI ethics' },
+        {
+          id: '2',
+          role: 'discussion',
+          content: 'Full summary',
+          discussion_turns: [
+            { id: 't-1', persona: '苏老师', content: '道德优先', turn: 1 }
+          ],
+          summary: '总结结论',
+        },
+      ],
+    }
+    api.get.mockResolvedValue({ data: mockHistory })
+
+    await store.fetchHistory('sess-1')
+
+    expect(api.get).toHaveBeenCalledWith('/chat/history/sess-1')
+    expect(store.currentSession).toBe('sess-1')
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1].role).toBe('discussion')
+    expect(store.messages[1].discussionTurns).toBeDefined()
+    expect(store.messages[1].discussionTurns).toHaveLength(1)
+    expect(store.messages[1].discussionTurns[0].persona).toBe('苏老师')
+    expect(store.messages[1].summary).toBe('总结结论')
+  })
+
+  it('saveMessageAsNote calls API and updates local message note info', async () => {
+    store.messages = [
+      { id: 'msg-1', role: 'assistant', content: '测试正文' }
+    ]
+    const mockNoteResp = {
+      data: {
+        success: true,
+        note: {
+          id: 'note-123',
+          title: '测试笔记标题',
+          tags: ['AI', '测试']
+        }
+      }
+    }
+    api.post.mockResolvedValue(mockNoteResp)
+
+    const res = await store.saveMessageAsNote('msg-1')
+
+    expect(api.post).toHaveBeenCalledWith('/chat/messages/msg-1/save-note')
+    expect(res.title).toBe('测试笔记标题')
+    expect(store.messages[0].saved_note).toEqual(mockNoteResp.data.note)
+    expect(store.messages[0].savedNote).toEqual(mockNoteResp.data.note)
+  })
+
+  it('stream done replaces local temp id with backend message_id (存为笔记 404 fix)', async () => {
+    const encoder = new TextEncoder()
+    const sse = [
+      'data: ' + JSON.stringify({ type: 'session', session_id: 'sess-x' }) + '\n\n',
+      'data: ' + JSON.stringify({ type: 'token', content: '你好' }) + '\n\n',
+      'data: ' + JSON.stringify({ type: 'done', message_id: 'db-msg-uuid-1' }) + '\n\n',
+    ].join('')
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: async () => {
+              if (sent) return { done: true, value: undefined }
+              sent = true
+              return { done: false, value: encoder.encode(sse) }
+            }
+          }
+        }
+      }
+    })
+    localStorage.setItem('token', 'tok')
+
+    await store.askQuestionStream('你好', [])
+
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant).toBeTruthy()
+    expect(assistant.id).toBe('db-msg-uuid-1')
+    expect(assistant.isStreaming).toBe(false)
+  })
+
+  it('fetchHistory normalizes saved_note into savedNote', async () => {
+    const mockHistory = {
+      messages: [
+        {
+          id: 'msg-note',
+          role: 'assistant',
+          content: '正文',
+          saved_note: { id: 'n-1', title: '深度学习', tags: ['DL'] }
+        }
+      ]
+    }
+    api.get.mockResolvedValue({ data: mockHistory })
+
+    await store.fetchHistory('sess-note')
+
+    expect(store.messages[0].savedNote).toEqual({ id: 'n-1', title: '深度学习', tags: ['DL'] })
+    expect(store.messages[0].saved_note).toEqual({ id: 'n-1', title: '深度学习', tags: ['DL'] })
+  })
+})
+
+describe('5.2 追问建议 store', () => {
+  let store
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useChatStore()
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('loadFollowupSuggestions 成功时挂到消息上', async () => {
+    store.messages.push({ id: 'm1', role: 'assistant', content: '回答' })
+    api.post.mockResolvedValue({ data: { suggestions: ['A？', 'B？', 'C？'] } })
+
+    await store.loadFollowupSuggestions('问题', '回答', 'm1')
+
+    expect(api.post).toHaveBeenCalledWith('/chat/suggest-followups', {
+      question: '问题',
+      answer: '回答',
+      n: 3
+    })
+    expect(store.messages[0].suggestions).toEqual(['A？', 'B？', 'C？'])
+    expect(store.messages[0].suggestionsLoading).toBe(false)
+  })
+
+  it('接口失败时 suggestionsLoading 复位且不抛错', async () => {
+    store.messages.push({ id: 'm2', role: 'assistant', content: '回答' })
+    api.post.mockRejectedValue(new Error('network'))
+
+    await store.loadFollowupSuggestions('问题', '回答', 'm2')
+
+    expect(store.messages[0].suggestions).toBeUndefined()
+    expect(store.messages[0].suggestionsLoading).toBe(false)
+  })
+
+  it('空问题/空回答不发起请求', async () => {
+    store.messages.push({ id: 'm3', role: 'assistant', content: '' })
+    await store.loadFollowupSuggestions('', '回答', 'm3')
+    await store.loadFollowupSuggestions('问题', '  ', 'm3')
+    expect(api.post).not.toHaveBeenCalled()
+  })
+})
+
+describe('P0-A 起始问题 store', () => {
+  let store
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useChatStore()
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('loadStarterSuggestions 成功写入 starterSuggestions', async () => {
+    api.post.mockResolvedValue({ data: { suggestions: ['A？', 'B？', 'C？'] } })
+    await store.loadStarterSuggestions(['d1'])
+    expect(api.post).toHaveBeenCalledWith('/chat/suggest-starters', {
+      document_ids: ['d1'],
+      n: 3
+    })
+    expect(store.starterSuggestions).toEqual(['A？', 'B？', 'C？'])
+    expect(store.starterSuggestionsLoading).toBe(false)
+  })
+
+  it('无文档时不传 document_ids', async () => {
+    api.post.mockResolvedValue({ data: { suggestions: [] } })
+    await store.loadStarterSuggestions()
+    expect(api.post).toHaveBeenCalledWith('/chat/suggest-starters', {
+      document_ids: undefined,
+      n: 3
+    })
+  })
+
+  it('接口失败静默清空', async () => {
+    api.post.mockRejectedValue(new Error('x'))
+    await store.loadStarterSuggestions()
+    expect(store.starterSuggestions).toEqual([])
+    expect(store.starterSuggestionsLoading).toBe(false)
+  })
+})
+
+describe('追问建议按 id 定位（OCR M4）', () => {
+  let store
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useChatStore()
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('await 期间会话被替换，建议不挂到新消息', async () => {
+    store.messages.push({ id: 'old-1', role: 'assistant', content: '旧回答' })
+    let resolvePost
+    api.post.mockReturnValue(new Promise(r => { resolvePost = r }))
+
+    const p = store.loadFollowupSuggestions('问题', '旧回答', 'old-1')
+    // 模拟会话切换：清空并换入新消息
+    store.messages = [{ id: 'new-9', role: 'assistant', content: '新回答' }]
+    resolvePost({ data: { suggestions: ['A？'] } })
+    await p
+
+    expect(store.messages[0].id).toBe('new-9')
+    expect(store.messages[0].suggestions).toBeUndefined()
+  })
+})
+
+
+/**
+ * F9 · 起始问题缓存与失效（fix(phase2-audit): F9）
+ */
+describe('chat store F9 起始问题', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    sessionStorage.clear()
+  })
+
+  it('同文档集合重复调用不二次请求模型', async () => {
+    const store = useChatStore()
+    api.post.mockResolvedValue({ data: { suggestions: ['Q1', 'Q2'] } })
+    await store.loadStarterSuggestions(['d1'])
+    await store.loadStarterSuggestions(['d1'])
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(store.starterSuggestions).toEqual(['Q1', 'Q2'])
+  })
+
+  it('切换文档集合后失效并重新生成', async () => {
+    const store = useChatStore()
+    api.post.mockResolvedValue({ data: { suggestions: ['A'] } })
+    await store.loadStarterSuggestions(['d1'])
+    api.post.mockResolvedValue({ data: { suggestions: ['B'] } })
+    await store.loadStarterSuggestions(['d1', 'd2'])
+    expect(api.post).toHaveBeenCalledTimes(2)
+    expect(store.starterSuggestions).toEqual(['B'])
+  })
+
+  it('失败时保留错误标记供 UI 显示重试', async () => {
+    const store = useChatStore()
+    api.post.mockRejectedValue(new Error('boom'))
+    await store.loadStarterSuggestions(['d1'])
+    expect(store.starterSuggestionsError).toBe(true)
+  })
+})

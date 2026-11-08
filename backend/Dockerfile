@@ -1,0 +1,106 @@
+# ---- Frontend Builder ----
+# Build context is the repository root (see docker-compose.yml).
+FROM docker.m.daocloud.io/library/node:20-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Root package.json is only a script shell — copy the real frontend manifests.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+# 子路径部署：构建时传 VITE_BASE=/study/，默认 '/' 表示挂在域名根路径。
+ARG VITE_BASE=/
+ENV VITE_BASE=${VITE_BASE}
+RUN npm run build
+
+# ---- Backend Builder ----
+FROM docker.m.daocloud.io/library/python:3.11-slim AS backend-builder
+
+# 可选：构建时传 APT_MIRROR 把 Debian 源换成国内/内网镜像（默认空=不改，海外环境行为不变）。
+# 国内服务器上 deb.debian.org 常慢到几十分钟，见 docker-compose.yml 的 build.args。
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        [ -f "$f" ] && sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g" "$f"; \
+      done; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_DEFAULT_TIMEOUT=300
+ENV PIP_RETRIES=5
+
+WORKDIR /app
+COPY backend/pyproject.toml ./
+COPY backend/app/ ./app/
+
+# torch 固定走 PyTorch CPU 专用索引（换成普通 PyPI 会装到带 CUDA 的大包）。
+# 国内服务器直连 download.pytorch.org 的 CDN 会慢到超时，故把索引做成可配置：
+# TORCH_INDEX_URL 指向国内 PyTorch 轮子镜像即可（如 https://mirror.sjtu.edu.cn/pytorch-wheels/cpu）。
+# PIP_INDEX_URL 仅作为其余依赖的补充索引。两者留空则行为与原先完全一致。
+ARG PIP_INDEX_URL=
+ARG TORCH_INDEX_URL=
+RUN pip install --no-cache-dir torch torchvision \
+    --index-url ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu} \
+    ${PIP_INDEX_URL:+--extra-index-url ${PIP_INDEX_URL}}
+RUN pip install --no-cache-dir uv
+RUN uv pip install --system --prefix=/install . \
+    ${PIP_INDEX_URL:+--index-url ${PIP_INDEX_URL}} \
+    --extra-index-url ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu} \
+    --index-strategy unsafe-best-match
+
+RUN mkdir -p /opt/hf
+
+# ---- Runtime ----
+FROM docker.m.daocloud.io/library/python:3.11-slim
+
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        [ -f "$f" ] && sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}/debian-security|g" "$f"; \
+      done; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nginx \
+    libpq-dev \
+    curl \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+
+# Backend deps from build stage
+COPY --from=backend-builder /install /usr/local
+COPY --from=backend-builder /opt/hf /opt/hf
+ENV HF_HOME=/opt/hf
+
+# Frontend from build stage
+COPY --from=frontend-builder /app/frontend/dist /usr/share/nginx/html/
+
+# Nginx config (proxy to localhost:8000)
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Backend code + Alembic（路径必须与 migrations.py 候选一致：
+# 优先 /app/alembic.ini，其次 /alembic.ini。stage-2 默认 WORKDIR 是 /，
+# 这里显式落到 /app，避免 site-packages 运行时找不到 script_location。）
+WORKDIR /app
+COPY backend/app/ ./app/
+COPY backend/alembic/ ./alembic/
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && \
+    chown -R www-data:www-data /usr/share/nginx/html && \
+    useradd -r -u 1000 -g www-data appuser && \
+    chown -R appuser:www-data /app && \
+    mkdir -p /app/uploads /app/vectorstore /app/.embedding_cache
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:80/health || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]
